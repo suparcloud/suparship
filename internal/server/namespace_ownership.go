@@ -92,7 +92,11 @@ func (ah *appHandler) ensureAppNamespace(ctx context.Context, app *domain.App, e
 	if env == nil || env.Namespace == "" {
 		return
 	}
-	client, clusterRef, brand := ah.envWorkloadClient(ctx, env.EnvName)
+	source := env.EnvName
+	if env.BaseEnv != "" {
+		source = env.BaseEnv
+	}
+	client, clusterRef, brand := ah.envWorkloadClient(ctx, source)
 	if client == nil {
 		return // bound cluster unreachable — ArgoCD CreateNamespace=true covers it
 	}

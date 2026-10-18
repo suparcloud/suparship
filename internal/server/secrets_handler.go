@@ -963,6 +963,9 @@ func (h *secretsHandler) scopeForRequestBase(r *http.Request) secrets.Scope {
 		return scope
 	}
 	env, err := h.appStore.GetAppEnvironment(r.Context(), project, app, scope.Env)
+	if err == nil && env != nil && env.EnvName == domain.ManagedValidationEnv && env.BaseEnv != "" {
+		return secrets.ValidationScope(env.BaseEnv)
+	}
 	if err != nil || env == nil || env.EnvType != domain.AppEnvPreview {
 		return scope
 	}
@@ -1039,7 +1042,7 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 	// Read the env band from the base env and fold in the preview band + this
 	// preview's own overrides on top.
 	readEnvName := envName
-	var previewBase, previewName string
+	var previewBase, previewName, validationBase string
 	if h.appStore != nil {
 		if e, err := h.appStore.GetAppEnvironment(ctx, project, appName, envName); err == nil && e != nil && e.EnvType == domain.AppEnvPreview {
 			previewName = envName
@@ -1051,6 +1054,12 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 		}
 	}
 
+	if h.appStore != nil {
+		if e, err := h.appStore.GetAppEnvironment(ctx, project, appName, envName); err == nil && e != nil && envName == domain.ManagedValidationEnv && e.BaseEnv != "" {
+			validationBase = e.BaseEnv
+			readEnvName = e.BaseEnv
+		}
+	}
 	global := read(secrets.GlobalScope())
 	env := read(secrets.EnvScope(readEnvName))
 	if previewName != "" {
@@ -1078,6 +1087,10 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 		cluster = read(secrets.ClusterScope(readEnvName, clusterRef))
 	}
 
+	if validationBase != "" {
+		override := read(secrets.ValidationScope(validationBase))
+		cluster.App = append(cluster.App, override.App...)
+	}
 	resolved := secrets.ResolveScopes(global, projectGlobal, stackGlobal, env, projectEnv, stackEnv, cluster)
 	sortedKeys := make([]string, 0, len(resolved))
 	for k := range resolved {

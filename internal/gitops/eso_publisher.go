@@ -74,9 +74,9 @@ type ESODataRef struct {
 // materializes one merged Secret (<app>-secrets) by extracting every present
 // scope/tier item in precedence order (later overwrites earlier).
 type ESOExternalSecretConfig struct {
-	Name      string // AppSecretName(app)
-	Namespace string // app namespace
-	StoreName string // default ClusterSecretStore (global store)
+	Name      string       // AppSecretName(app)
+	Namespace string       // app namespace
+	StoreName string       // default ClusterSecretStore (global store)
 	Items     []ESOItemRef // dataFrom (whole-item) mode — the app-wide secret
 	// Data is the data[] (per-key select/rename) mode — the per-component secret
 	// projection. Mutually exclusive with Items.
@@ -361,9 +361,11 @@ type ScopeSecretKeys struct {
 // WorkloadExternalSecretParams captures the per-app-env info for the single
 // merged ExternalSecret.
 type WorkloadExternalSecretParams struct {
-	App       string
-	Namespace string
-	Env       string
+	Validation     bool
+	ValidationKeys []string
+	App            string
+	Namespace      string
+	Env            string
 	// Project is the app's project, used to locate project-scope shared items.
 	// Empty skips the project scopes regardless of presence.
 	Project string
@@ -525,6 +527,10 @@ func buildScopeItems(p WorkloadExternalSecretParams) []scopeItem {
 		if p.Presence.ClusterApp {
 			appItem(cluster, sk.ClusterApp)
 		}
+	}
+
+	if p.Validation {
+		appItem(secrets.ValidationScope(p.Env), p.ValidationKeys)
 	}
 
 	// Preview bands: applied on top of the base env for previews only.

@@ -894,6 +894,7 @@ type AppImageBinding struct {
 // via AppSpec.Images. Not
 // configured here, so a chart with one or many services is handled uniformly.
 type CDConfig struct {
+	ReleaseValidationManaged bool `json:"releaseValidationManaged,omitempty" yaml:"releaseValidationManaged,omitempty"`
 	// ReleaseValidationEnvironment opts into an independent validation root.
 	ReleaseValidationEnvironment string `json:"releaseValidationEnvironment,omitempty" yaml:"releaseValidationEnvironment,omitempty"`
 	// Empty or persistent retains workloads; ephemeral removes them between runs.

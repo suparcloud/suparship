@@ -56,6 +56,9 @@ func MapPlatformValuesForEnv(
 	// secure=false is arbitrary here: stripScheme discards the scheme, charts
 	// only ever see the bare host.
 	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, effectiveBase, false))
+	if app.Spec.CD.ManagedValidation() && envName == domain.ManagedValidationEnv {
+		routingHost = domain.ValidationIdentity(app.ProjectName, app.Name) + "." + effectiveBase
+	}
 
 	platform := PlatformValues{
 		Org:        orgName,
@@ -152,6 +155,9 @@ func MapComponentPlatformValuesForEnv(
 	// keeps the context self-consistent.
 	instanceName := app.Name + "-" + comp.Name
 	platform.RoutingHost = stripScheme(domain.GenerateURLWithDomain(instanceName, envName, envType, platform.BaseDomain, false))
+	if app.Spec.CD.ManagedValidation() && envName == domain.ManagedValidationEnv {
+		platform.RoutingHost = domain.ValidationIdentity(app.ProjectName, secrets.DedupProjectPrefix(app.Name, comp.Name)) + "." + platform.BaseDomain
+	}
 	platform.Component = comp.Name
 	return platform
 }

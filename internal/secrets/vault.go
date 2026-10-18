@@ -28,7 +28,8 @@ const (
 	// preview of an app on top of its base env. Items live in the base env's
 	// vault (named with a preview suffix), so previews need no vault of their
 	// own — the same pattern cluster overrides use.
-	ScopePreview ScopeKind = "preview"
+	ScopeValidation ScopeKind = "validation"
+	ScopePreview    ScopeKind = "preview"
 	// ScopePreviewPR holds a single preview's (PR's) override. Items live in the
 	// base env's vault alongside the preview band, keyed by the preview name.
 	ScopePreviewPR ScopeKind = "previewpr"
@@ -181,3 +182,5 @@ type ItemExporter interface {
 	// An absent item is (nil, nil) — not an error.
 	ExportItem(ctx context.Context, scope Scope, tier Tier, app string) (map[string][]byte, error)
 }
+
+func ValidationScope(base string) Scope { return Scope{Kind: ScopeValidation, Env: base} }

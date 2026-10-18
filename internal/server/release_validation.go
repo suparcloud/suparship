@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/gitops"
 )
 
 func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
@@ -52,12 +53,25 @@ func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain
 			return fmt.Errorf("configure acceptance checks for %q before replacing the checked release source %q", name, env)
 		}
 	}
-	if len(ah.appDeployClusterRefs(ctx, app.ProjectName, app.Name, name)) == 0 {
+	boundEnv := name
+	if app.Spec.CD.ManagedValidation() {
+		if base := domain.BaseEnvironment(envs, name); base != nil {
+			boundEnv = base.EnvName
+		}
+	}
+	if len(ah.appDeployClusterRefs(ctx, app.ProjectName, app.Name, boundEnv)) == 0 {
 		return fmt.Errorf("bind validation environment %q to a cluster in Settings > Environments before enabling release validation", name)
 	}
 	seen := map[string]string{}
 	for env := range sources {
-		for _, target := range ah.argoAppNamesForEnv(ctx, app.ProjectName, app.Name, env) {
+		targets := ah.argoAppNamesForEnv(ctx, app.ProjectName, app.Name, env)
+		if app.Spec.CD.ManagedValidation() && env == name {
+			targets = nil
+			for _, ref := range ah.appDeployClusterRefs(ctx, app.ProjectName, app.Name, boundEnv) {
+				targets = append(targets, argoClusterApp{cluster: ref, name: gitops.RenderArgoAppName(gitops.ValidationNamePattern, app.ProjectName, app.Name, env, ref)})
+			}
+		}
+		for _, target := range targets {
 			if previous, ok := seen[target.name]; ok && previous != env {
 				return fmt.Errorf("environments %q and %q resolve to the same Argo CD Application %q; use distinct cluster registrations or an application naming pattern containing {env} before enabling release validation", previous, env, target.name)
 			}
@@ -65,4 +79,13 @@ func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain
 		}
 	}
 	return nil
+}
+
+func (ah *appHandler) validationNamePattern(ctx context.Context, project, app, env, pattern string) string {
+	if env == domain.ManagedValidationEnv && ah.appStore != nil {
+		if a, err := ah.appOnce(ctx, project, app); err == nil && a.Spec.CD.ManagedValidation() {
+			return "{projectApp}-{env}-{cluster}"
+		}
+	}
+	return pattern
 }

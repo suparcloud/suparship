@@ -5,6 +5,7 @@ import "github.com/suparcloud/suparship/internal/domain"
 // AppSetEnv parameterises one environment in an ApplicationSet.
 // Each instance maps to one cluster in the env/cluster-centric Model B layout.
 type AppSetEnv struct {
+	ManagedValidation bool
 	// EnvName is the logical environment name, e.g. "staging".
 	EnvName string
 	// ClusterServer is the Kubernetes API server URL for this environment's cluster.

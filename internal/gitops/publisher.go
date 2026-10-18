@@ -313,17 +313,20 @@ func (p *Publisher) writeEnvInfra(repoDir, projectName string, envs []AppSetEnv)
 			// Platform-owned ApplicationSet that ships per-app ConfigMap +
 			// ExternalSecret from _app-resources/ to this env's workload cluster,
 			// decoupled from the app's chart Application.
-			platformAppSet := BuildPlatformAppSet(env, p.cfg.ArgoCDRepoURL, AppSetOptions{
-				SyncAutomated:      p.cfg.SyncAutomated,
-				SubPath:            p.cfg.SubPath,
-				ArgoAppNamePattern: p.cfg.ResourceNaming.EffectiveArgoAppName(),
-			})
-			platformBytes, err := yaml.Marshal(platformAppSet)
-			if err != nil {
-				return fmt.Errorf("marshal platform appset for env %s: %w", env.EnvName, err)
-			}
-			if err := p.writeFile(filepath.Join(infraDir, env.EnvName+"-platform-appset.yaml"), platformBytes); err != nil {
-				return err
+			if !env.ManagedValidation {
+				platformAppSet := BuildPlatformAppSet(env, p.cfg.ArgoCDRepoURL, AppSetOptions{
+					SyncAutomated:      p.cfg.SyncAutomated,
+					SubPath:            p.cfg.SubPath,
+					ArgoAppNamePattern: p.cfg.ResourceNaming.EffectiveArgoAppName(),
+				})
+				platformBytes, err := yaml.Marshal(platformAppSet)
+				if err != nil {
+					return fmt.Errorf("marshal platform appset for env %s: %w", env.EnvName, err)
+				}
+				if err := p.writeFile(filepath.Join(infraDir, env.EnvName+"-platform-appset.yaml"), platformBytes); err != nil {
+					return err
+				}
+
 			}
 
 			// Authorize every destination cluster the env fans out to (one in
@@ -653,6 +656,18 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 // PublishApp so the batch publisher (PublishApps) can write many apps into one
 // clone and commit once.
 func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	for _, env := range envs {
+		if env.BaseEnv != "" && !app.Spec.CD.ManagedValidation() {
+			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
+				return err
+			}
+			stage := p.outputDir(repoDir, "_infra", "kargo", KargoNamespaceForProject(app.ProjectName)+"-"+app.Name+"-"+env.EnvName+"-stage.yaml")
+			if err := os.Remove(stage); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+
 	// Composed apps (>=1 component carries its own Template) render as one
 	// multi-source Application per (app, cluster) — a separate tree with its own
 	// per-env App-of-Apps. Handled entirely by writeComposedAppTree; the
@@ -910,7 +925,7 @@ func componentConfigProjection(appName string, c domain.ComponentSpec, appVars m
 // behind that component's platform.configMapName) into the app's _app-resources
 // tree, alongside the app-wide env-configmap, so the platform ApplicationSet ships it.
 func (p *Publisher) writeComponentConfigMap(repoDir string, env AppPublishEnv, app *domain.App, component, name, namespace string, vars map[string]string) error {
-	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
+	resDir := p.platformResourcesDir(repoDir, app, env)
 	content := BuildAppConfigMapYAML(name, namespace, vars, p.cfg.Branding)
 	return p.writeFile(filepath.Join(resDir, "component-"+component+"-configmap.yaml"), []byte(content))
 }
@@ -941,7 +956,9 @@ func (p *Publisher) buildComponentExternalSecret(env AppPublishEnv, app *domain.
 	return BuildComponentExternalSecret(WorkloadExternalSecretParams{
 		App:             app.Name,
 		Namespace:       namespace,
-		Env:             env.EnvName,
+		Env:             secretSourceEnv(env),
+		Validation:      env.BaseEnv != "",
+		ValidationKeys:  env.ValidationKeys,
 		Project:         app.ProjectName,
 		Stack:           app.Spec.Stack,
 		Cluster:         env.ClusterRef,
@@ -956,7 +973,7 @@ func (p *Publisher) buildComponentExternalSecret(env AppPublishEnv, app *domain.
 // writeComponentExternalSecret writes the given per-component ExternalSecret into
 // the app's platform-owned _app-resources tree.
 func (p *Publisher) writeComponentExternalSecret(repoDir string, env AppPublishEnv, app *domain.App, component string, esCfg *ESOExternalSecretConfig) error {
-	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
+	resDir := p.platformResourcesDir(repoDir, app, env)
 	content := BuildExternalSecretYAML(*esCfg)
 	return p.writeFile(filepath.Join(resDir, "component-"+component+"-externalsecret.yaml"), []byte(content))
 }
@@ -968,7 +985,7 @@ func (p *Publisher) writeComponentExternalSecret(repoDir string, env AppPublishE
 // leaves no orphaned ConfigMap/ExternalSecret behind (the app-wide env-configmap /
 // external-secret files use different names, so they're untouched).
 func (p *Publisher) pruneComponentProjections(repoDir string, env AppPublishEnv, app *domain.App) error {
-	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
+	resDir := p.platformResourcesDir(repoDir, app, env)
 	for _, pat := range []string{"component-*-configmap.yaml", "component-*-externalsecret.yaml"} {
 		matches, err := filepath.Glob(filepath.Join(resDir, pat))
 		if err != nil {
@@ -1006,7 +1023,7 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		// Env-scoped template pins: everything below renders THIS env's effective
 		// template versions (chart source paths in the Application), so an
 		// upgraded staging runs the new chart while production keeps its own.
-		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		app := domain.AppForEnvTemplateVersions(ValidationApp(app, env.BaseEnv), env.EnvName)
 		dormant, err := p.validationDormant(repoDir, app, env)
 		if err != nil {
 			return err
@@ -1267,7 +1284,7 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			composedOpts := ComposedBuildOptions{
 				RepoURL:         p.cfg.ArgoCDRepoURL,
 				SubPath:         p.cfg.SubPath,
-				AppName:         RenderArgoAppName(namePattern, app.ProjectName, app.Name, env.EnvName, targetName),
+				AppName:         RenderArgoAppName(validationPattern(app, env.EnvName, namePattern), app.ProjectName, app.Name, env.EnvName, targetName),
 				EnvName:         env.EnvName,
 				ClusterName:     targetName,
 				ClusterServer:   server,
@@ -1496,7 +1513,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 
 		// Env-scoped template pins: app.yaml's ChartPath below must point at THIS
 		// env's effective template version.
-		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		app := domain.AppForEnvTemplateVersions(ValidationApp(app, env.BaseEnv), env.EnvName)
 		dormant, err := p.validationDormant(repoDir, app, env)
 		if err != nil {
 			return err
@@ -1727,7 +1744,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 				// app.yaml for this (app, cluster): fully-rendered Application name
 				// so existing names are unchanged, plus destination + values path.
 				meta := baseMeta
-				meta.AppName = RenderArgoAppName(namePattern, app.ProjectName, app.Name, env.EnvName, targetName)
+				meta.AppName = RenderArgoAppName(validationPattern(app, env.EnvName, namePattern), app.ProjectName, app.Name, env.EnvName, targetName)
 				meta.ClusterName = targetName
 				meta.ClusterServer = server
 				meta.ValuesPath = p.envAppRelPath(chartMode, env, valueParts...)
@@ -2059,11 +2076,13 @@ func (p *Publisher) writeAppPlatformResources(
 	env AppPublishEnv,
 	envVars map[string]string,
 ) error {
-	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
+	resDir := p.platformResourcesDir(repoDir, app, env)
 	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 		App:             app.Name,
 		Namespace:       namespace,
-		Env:             env.EnvName,
+		Env:             secretSourceEnv(env),
+		Validation:      env.BaseEnv != "",
+		ValidationKeys:  env.ValidationKeys,
 		Project:         app.ProjectName,
 		Stack:           app.Spec.Stack,
 		Cluster:         env.ClusterRef,
@@ -2075,6 +2094,11 @@ func (p *Publisher) writeAppPlatformResources(
 	meta := PlatformAppMeta{Name: app.Name, Project: app.ProjectName, Namespace: namespace}
 	if err := p.writePlatformDir(resDir, secrets.AppConfigMapName(app.Name), namespace, envVars, esCfg, meta); err != nil {
 		return err
+	}
+	if env.BaseEnv != "" {
+		if err := p.writeValidationPlatformApplications(repoDir, app, env); err != nil {
+			return err
+		}
 	}
 	// Migration: remove platform manifests that older publishers wrote into the
 	// app's own (chart) directory.
@@ -2550,7 +2574,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			GitOpsRepoInsecure:    p.cfg.InsecureRegistry,
 			Branding:              p.cfg.Branding,
 			SubPath:               p.cfg.SubPath,
-			ArgoAppNamePattern:    p.cfg.ResourceNaming.EffectiveArgoAppName(),
+			ArgoAppNamePattern:    validationPattern(app, env.EnvName, p.cfg.ResourceNaming.EffectiveArgoAppName()),
 			Clusters:              env.Clusters,
 			Composed:              composed,
 			SyncAutomated:         p.cfg.SyncAutomated,
@@ -2673,7 +2697,9 @@ type ComponentPlatformValues struct {
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
 type AppPublishEnv struct {
-	PrepareOnly bool
+	BaseEnv        string
+	ValidationKeys []string
+	PrepareOnly    bool
 	// AutoPromote opts this app's pipeline into auto-promotion to prod (the
 	// effective value of CDConfig.AutoPromote ORed with its stack's setting).
 	// App-wide, carried on every env; the Kargo policy builder enables auto

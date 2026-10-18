@@ -1404,6 +1404,15 @@ func (a *gitOpsPublisherAdapter) buildAppBundle(ctx context.Context, app *domain
 	pubEnvs := make([]gitops.AppPublishEnv, 0, len(envs))
 
 	for _, env := range envs {
+		if env.BaseEnv != "" && env.EnvName == domain.ManagedValidationEnv {
+			pub, err := a.buildManagedValidationPub(ctx, app, env)
+			if err != nil {
+				return nil, nil, err
+			}
+			pubEnvs = append(pubEnvs, pub)
+			appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{ManagedValidation: true, EnvName: env.EnvName, ClusterServer: activeValidationServer(pub), Clusters: pub.Clusters, BaseDomain: pub.BaseDomain})
+			continue
+		}
 		res, ok := resolved[env.EnvName]
 		if !ok {
 			// Environment not in org config — treat as unbound so we don't
@@ -1923,6 +1932,9 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 // vars, platform/stack overlays, CD images, suspend key). Shared by PublishAppEnv
 // and the batched PublishAppsEnv so both write identical values.yaml.
 func (a *gitOpsPublisherAdapter) buildAppEnvPub(ctx context.Context, app *domain.App, env *domain.AppEnvironment) (gitops.AppPublishEnv, error) {
+	if app.Spec.CD.ManagedValidation() && env.EnvName == domain.ManagedValidationEnv {
+		return a.buildManagedValidationPub(ctx, app, env)
+	}
 	// Resolve the template up front; fail loud on a cluster-fetch error so a
 	// promote never writes values.yaml missing the platform/env overlays.
 	tmpl, err := a.resolveTemplate(ctx, app.Spec.Template.Name)
@@ -3154,4 +3166,53 @@ func (a *gitOpsPublisherAdapter) SetValidationWorkloads(ctx context.Context, app
 	}
 	a.refreshApps(ctx, app.ProjectName, app.Name)
 	return nil
+}
+
+// A managed validator inherits the same cluster and all base configuration;
+// only its workload identity, namespace, route and explicit override band differ.
+func (a *gitOpsPublisherAdapter) buildManagedValidationPub(ctx context.Context, app *domain.App, env *domain.AppEnvironment) (gitops.AppPublishEnv, error) {
+	if env.BaseEnv == "" {
+		return gitops.AppPublishEnv{}, fmt.Errorf("managed validation is missing its base environment")
+	}
+	base := *env
+	base.EnvName = env.BaseEnv
+	base.BaseEnv = ""
+	pub, err := a.buildAppEnvPub(ctx, app, &base)
+	if err != nil {
+		return pub, err
+	}
+	if !pub.Bound {
+		return pub, fmt.Errorf("base environment %q is not bound to a cluster", env.BaseEnv)
+	}
+	pub.BaseEnv = env.BaseEnv
+	pub.EnvName = env.EnvName
+	pub.Namespace = env.Namespace
+	pub.Order = env.Order
+	pub.AutoPromote = app.Spec.CD.AutoPromote
+	if pub.EnvVars == nil {
+		pub.EnvVars = map[string]string{}
+	}
+	for k, v := range app.Spec.EnvironmentDefaults[env.EnvName].EnvConfig.Vars {
+		pub.EnvVars[k] = v
+	}
+	if a.vault != nil {
+		scope := secrets.ValidationScope(env.BaseEnv).WithProject(app.ProjectName)
+		if err := a.vault.EnsureItem(ctx, scope, secrets.TierApp, app.Name); err != nil {
+			return pub, fmt.Errorf("prepare validation secret overrides: %w", err)
+		}
+		keys, err := a.vault.ListKeys(ctx, scope, secrets.TierApp, app.Name)
+		if err != nil {
+			return pub, fmt.Errorf("read validation secret keys: %w", err)
+		}
+		for _, key := range keys {
+			pub.ValidationKeys = append(pub.ValidationKeys, key.Key)
+		}
+	}
+	return pub, nil
+}
+func activeValidationServer(pub gitops.AppPublishEnv) string {
+	if len(pub.Clusters) > 0 {
+		return pub.Clusters[0].Server
+	}
+	return "https://kubernetes.default.svc"
 }

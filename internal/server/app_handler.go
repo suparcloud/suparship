@@ -794,11 +794,20 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cd := cdConfigFromDTO(req.CD)
+		if req.CD.ReleaseValidationManaged == nil {
+			cd.ReleaseValidationManaged = app.Spec.CD.ReleaseValidationManaged
+		}
 		if req.CD.ReleaseValidationMode == nil {
 			cd.ReleaseValidationMode = app.Spec.CD.ReleaseValidationMode
 		}
 		if req.CD.ReleaseValidationEnvironment == nil {
 			cd.ReleaseValidationEnvironment = app.Spec.CD.ReleaseValidationEnvironment
+		}
+		if cd.ReleaseValidationManaged {
+			cd.ReleaseValidationEnvironment = domain.ManagedValidationEnv
+			if cd.ReleaseValidationMode == "" {
+				cd.ReleaseValidationMode = "ephemeral"
+			}
 		}
 		if req.CD.Verification == nil {
 			cd.Verification = app.Spec.CD.Verification
@@ -919,6 +928,19 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		app.Spec.EnvironmentDefaults = ed
 	}
 
+	if prevCD.ManagedValidation() && !app.Spec.CD.ManagedValidation() {
+		ov := app.Spec.EnvironmentDefaults[domain.ManagedValidationEnv]
+		disabled := false
+		ov.Deploy = &disabled
+		app.Spec.EnvironmentDefaults[domain.ManagedValidationEnv] = ov
+	} else if app.Spec.CD.ManagedValidation() {
+		if app.Spec.EnvironmentDefaults == nil {
+			app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+		}
+		ov := app.Spec.EnvironmentDefaults[domain.ManagedValidationEnv]
+		ov.Deploy = nil
+		app.Spec.EnvironmentDefaults[domain.ManagedValidationEnv] = ov
+	}
 	validationEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "could not read deployment environments"})
@@ -932,7 +954,15 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 				found = true
 			}
 		}
-		if !found {
+		if !found && app.Spec.CD.ManagedValidation() {
+			base := domain.BaseEnvironment(validationEnvs, name)
+			if base == nil {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "release validation requires a base environment"})
+				return
+			}
+			addedValidationEnv = &domain.AppEnvironment{AppName: app.Name, ProjectName: app.ProjectName, EnvName: name, EnvType: domain.AppEnvStaging, Order: base.Order + 1, BaseEnv: base.EnvName, Namespace: domain.ValidationIdentity(app.ProjectName, app.Name)}
+			validationEnvs = append(validationEnvs, addedValidationEnv)
+		} else if !found {
 			for _, env := range ah.stableEnvsFromOrg(r.Context(), app) {
 				if env.EnvName == name {
 					addedValidationEnv = env
@@ -2777,6 +2807,10 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 	}
 
 	for _, env := range envs {
+		if app.Spec.CD.ManagedValidation() && env.EnvName == domain.ManagedValidationEnv {
+			env.Namespace = domain.ValidationIdentity(app.ProjectName, app.Name)
+			continue
+		}
 		ns, resolveErr := domain.ResolveNamespace(domain.NamespaceResolveInput{
 			AppName:           app.Name,
 			EnvName:           env.EnvName,
@@ -4303,6 +4337,13 @@ func (ah *appHandler) appDeployClusterRefs(ctx context.Context, projectName, app
 	if err != nil || org == nil {
 		return nil
 	}
+	if ah.appStore != nil && appName != "" {
+		if app, err := ah.appOnce(ctx, projectName, appName); err == nil && app.Spec.CD.ManagedValidation() && envName == domain.ManagedValidationEnv {
+			if env, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName); err == nil && env.BaseEnv != "" {
+				envName = env.BaseEnv
+			}
+		}
+	}
 	var deployTargets, clusterRefs []string
 	for _, e := range org.Environments {
 		if e.Name == envName {
@@ -4374,7 +4415,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	// workload cluster from the base env, else routing falls back to the local
 	// cluster and the preview always reads as 0/0 "not deployed".
 	routeEnv := env.EnvName
-	if env.EnvType == domain.AppEnvPreview && env.BaseEnv != "" {
+	if env.BaseEnv != "" {
 		routeEnv = env.BaseEnv
 	}
 	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, env.ProjectName, appName, routeEnv)
@@ -4661,7 +4702,7 @@ func (ah *appHandler) argoAppNamesForEnv(ctx context.Context, projectName, appNa
 	for _, c := range clusters {
 		out = append(out, argoClusterApp{
 			cluster: c,
-			name:    gitops.RenderArgoAppName(pattern, projectName, appName, envName, c),
+			name:    gitops.RenderArgoAppName(ah.validationNamePattern(ctx, projectName, appName, envName, pattern), projectName, appName, envName, c),
 		})
 	}
 	return out
@@ -4936,6 +4977,9 @@ func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
 		return domain.CDConfig{}
 	}
 	cd := domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote, Verification: dto.Verification}
+	if dto.ReleaseValidationManaged != nil {
+		cd.ReleaseValidationManaged = *dto.ReleaseValidationManaged
+	}
 	if dto.ReleaseValidationMode != nil {
 		cd.ReleaseValidationMode = *dto.ReleaseValidationMode
 	}
@@ -5080,7 +5124,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		RawValues:           app.Spec.RawValues,
 		EnvRawValues:        envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		EnvTemplateVersions: envTemplateVersionsDTO(app.Spec.EnvironmentDefaults),
-		CD:                  CDConfigDTO{ReleaseValidationMode: &app.Spec.CD.ReleaseValidationMode, PromotionSources: promotionSources, ReleaseValidationEnvironment: &app.Spec.CD.ReleaseValidationEnvironment, Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured, Verification: app.Spec.CD.Verification},
+		CD:                  CDConfigDTO{ReleaseValidationManaged: &app.Spec.CD.ReleaseValidationManaged, ReleaseValidationMode: &app.Spec.CD.ReleaseValidationMode, PromotionSources: promotionSources, ReleaseValidationEnvironment: &app.Spec.CD.ReleaseValidationEnvironment, Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured, Verification: app.Spec.CD.Verification},
 		Images:              appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:        string(app.Spec.DeliveryMode),
 		PreviewsEnabled:     app.Spec.PreviewsEnabled,

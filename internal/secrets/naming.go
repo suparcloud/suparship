@@ -22,7 +22,7 @@ func EnvVaultName(env string) string { return envVaultPrefix + env }
 // live in their environment's vault.
 func VaultName(scope Scope) string {
 	switch scope.Kind {
-	case ScopeEnv, ScopeCluster, ScopeProjectEnv, ScopeStackEnv, ScopePreview, ScopePreviewPR:
+	case ScopeEnv, ScopeCluster, ScopeProjectEnv, ScopeStackEnv, ScopePreview, ScopePreviewPR, ScopeValidation:
 		return EnvVaultName(scope.Env)
 	default:
 		// ScopeGlobal, ScopeProject and ScopeStack all live in the org global
@@ -51,6 +51,8 @@ func scopeSuffix(scope Scope) string {
 		return "stack-" + scope.Project + "-" + scope.Stack
 	case ScopeStackEnv:
 		return "stack-" + scope.Project + "-" + scope.Stack + "-env-" + scope.Env
+	case ScopeValidation:
+		return "env-release-validation"
 	case ScopePreview:
 		// Lives in the base env vault; item name carries the preview suffix.
 		return "env-preview"
@@ -88,6 +90,9 @@ func SharedItemName(scope Scope) string {
 // always tag the scope with the project.
 func AppItemName(scope Scope, app string) string {
 	if scope.Project != "" {
+		if scope.Kind == ScopeValidation {
+			return DedupProjectPrefix(scope.Project, app) + "-" + scopeSuffix(scope)
+		}
 		return scope.Project + "-" + app + "-" + scopeSuffix(scope)
 	}
 	return app + "-" + scopeSuffix(scope)
@@ -125,7 +130,7 @@ func UnifiedStoreName() string { return unifiedStoreName }
 // diverge for cluster scope.
 func StoreName(scope Scope) string {
 	switch scope.Kind {
-	case ScopeCluster, ScopeProjectEnv, ScopeStackEnv, ScopePreview, ScopePreviewPR:
+	case ScopeCluster, ScopeProjectEnv, ScopeStackEnv, ScopePreview, ScopePreviewPR, ScopeValidation:
 		// All live in the env vault → read from the env store.
 		return "suparship-store-" + scopeSuffix(EnvScope(scope.Env))
 	case ScopeProject, ScopeStack:

@@ -277,6 +277,7 @@ type AppDetailDTO struct {
 // declared by the template's image slots; the repository each slot watches is
 // bound per-app via the Images field, not here.
 type CDConfigDTO struct {
+	ReleaseValidationManaged *bool `json:"releaseValidationManaged,omitempty"`
 	// PromotionSources is a read-only resolved target-to-source map; empty values are Warehouse roots.
 	PromotionSources             map[string]string   `json:"promotionSources,omitempty"`
 	ReleaseValidationMode        *string             `json:"releaseValidationMode,omitempty"`

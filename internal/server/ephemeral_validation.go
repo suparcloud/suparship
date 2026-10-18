@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/suparcloud/suparship/internal/kube"
 	"log/slog"
 	"time"
 
@@ -77,6 +79,13 @@ func (ah *appHandler) reconcileEphemeralValidation(ctx context.Context, app *dom
 			},
 		})
 	})
+	if errors.Is(err, kube.ErrValidationStageMissing) {
+		// Recover persisted settings after an interrupted initial publication.
+		// PublishApp preserves dormancy; it cannot activate an unverified image.
+		if envs, listErr := ah.appStore.ListAppEnvironments(ctx, app.ProjectName, app.Name); listErr == nil {
+			err = ah.gitOpsPublisher.PublishApp(ctx, app, envs)
+		}
+	}
 	if err != nil {
 		slog.Debug("ephemeral validation: retrying lifecycle", "project", app.ProjectName, "app", app.Name, "err", err)
 	}

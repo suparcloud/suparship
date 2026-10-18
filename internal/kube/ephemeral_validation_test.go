@@ -76,3 +76,12 @@ func TestValidationObservesPromotionFailureWithoutVerifying(t *testing.T) {
 		t.Fatalf("bad promotion observation: %+v %v", obs, err)
 	}
 }
+
+func TestValidationLeaseReportsMissingStageBeforeRunningAction(t *testing.T) {
+	store, _ := newKargoStore(t)
+	called := false
+	err := store.WithValidationLease(context.Background(), "voiceai", "missing", "release-validation", func(context.Context, *domain.ValidationRun) error { called = true; return nil })
+	if !errors.Is(err, ErrValidationStageMissing) || called {
+		t.Fatalf("unsafe missing-stage recovery: called=%t err=%v", called, err)
+	}
+}

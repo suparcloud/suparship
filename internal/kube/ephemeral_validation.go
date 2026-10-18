@@ -22,6 +22,7 @@ const validationRunAnnotation = "suparship.io/validation-run"
 const validationLeaseAnnotation = "suparship.io/validation-lease"
 
 var ErrValidationLeaseBusy = errors.New("validation lifecycle is busy")
+var ErrValidationStageMissing = errors.New("validation stage has not been published")
 
 type validationLease struct {
 	Token string    `json:"token"`
@@ -41,6 +42,9 @@ func (s *KargoStore) WithValidationLease(ctx context.Context, project, app, env 
 	var run domain.ValidationRun
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		obj, err := resource.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: %v", ErrValidationStageMissing, err)
+		}
 		if err != nil {
 			return err
 		}

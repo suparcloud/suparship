@@ -178,3 +178,33 @@ func TestEphemeralValidationRejectsSharedNamespaceAndInvalidMode(t *testing.T) {
 		t.Fatalf("unknown mode accepted: %v", err)
 	}
 }
+
+func TestManagedValidationNeedsNoOrgEnvironment(t *testing.T) {
+	ah, store, _, _ := autoPromoteFixture(t, true)
+	app := storedApp(t, store)
+	app.Spec.Images = []domain.AppImageBinding{{Name: "main", TagKey: "image.tag"}}
+	store.addApp(app)
+	ah.orgProvider = &countingOrgProvider{org: &rbac.Org{Name: "test", Environments: []rbac.OrgEnvironment{
+		{Name: "staging", Order: 1, ClusterRefs: []string{"local"}},
+		{Name: "prod", Order: 2, ClusterRefs: []string{"production"}},
+	}}}
+	req := httptest.NewRequest("PATCH", "/", strings.NewReader(`{"cd":{"managed":true,"autoPromote":true,"releaseValidationManaged":true}}`))
+	req.SetPathValue("project", testProject)
+	req.SetPathValue("app", app.Name)
+	w := httptest.NewRecorder()
+	ah.handleUpdateApp(w, req)
+	if w.Code != 200 {
+		t.Fatalf("enable: %d %s", w.Code, w.Body.String())
+	}
+	saved, _ := store.GetApp(req.Context(), testProject, app.Name)
+	if !saved.Spec.CD.ManagedValidation() || !saved.Spec.CD.EphemeralValidation() {
+		t.Fatalf("wrong defaults: %+v", saved.Spec.CD)
+	}
+	env, err := store.GetAppEnvironment(req.Context(), testProject, app.Name, domain.ManagedValidationEnv)
+	if err != nil || env.BaseEnv != "staging" || env.Namespace != domain.ValidationIdentity(testProject, app.Name) {
+		t.Fatalf("wrong managed instance: %+v %v", env, err)
+	}
+	if refs := ah.appDeployClusterRefs(req.Context(), testProject, app.Name, env.EnvName); len(refs) != 1 || refs[0] != "local" {
+		t.Fatalf("wrong cluster: %v", refs)
+	}
+}
