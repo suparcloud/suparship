@@ -3540,7 +3540,7 @@ function AppValuesEditor({
 
         {!isDirect && (
           <div className="mt-4 border-t border-gray-100 pt-4">
-            <div className="flex items-start justify-between gap-4">
+            <div className="space-y-4">
               <div className="min-w-0">
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
                   <input
@@ -3606,13 +3606,20 @@ function AppValuesEditor({
                   </label>
                 ))}
               </div>
-              <button
-                onClick={saveCD}
-                disabled={cdSaving || !cdDirty || (separateValidation && !validationEnvironment)}
-                className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-              >
-                {cdSaving ? "Saving…" : "Save CD"}
-              </button>
+              <div className="flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
+                <button
+                  onClick={saveCD}
+                  disabled={cdSaving || !cdDirty || (separateValidation && !validationEnvironment)}
+                  className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+                >
+                  {cdSaving ? "Saving…" : "Save delivery settings"}
+                </button>
+                {separateValidation && !validationEnvironment && (
+                  <p role="status" className="text-xs text-amber-700">
+                    Choose a validation environment to save. If none are available, create one and assign a cluster in Settings → Environments first.
+                  </p>
+                )}
+              </div>
             </div>
           </div>
         )}
