@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Optional ephemeral release validation
+
+- Keep persistent validation as the default; opt into disposable validation workloads.
+- Prepare and verify one release at a time, remove successful workloads through GitOps,
+  and retain failed runs for one hour. Preserve verification history for promotion.
+- Persist lifecycle progress and serialize workers; show idle/preparing/cleanup states.
+- Keep persistent data outside ephemeral validation and reject declared stateful components.
+
+### Optional separate release validation
+
+- Select a persistent validation environment per app so new builds can be verified
+  and promoted while staging remains pinned. Existing apps retain their ordered flow.
+- Show resolved promotion sources and validate bindings, acceptance checks, and
+  Application-name uniqueness before enabling. Resources remain running between releases.
+
+See the [release validation guide](docs/release-validation.md).
+
+### Verified-release promotion
+
+- Promote a previously verified release while staging remains pinned to a preview.
+  New unverified builds require staging verification unless separate release validation is configured.
+- Select releases in the UI or API, configure existing acceptance templates, and
+  prepare first-deployment targets without automatically deploying a seed image.
+- Use Kargo-compatible release/rollback names and shared duplicate protection.
+- Wait for the live, acknowledged Kargo scheduler handoff before downstream
+  auto-promotion; add ProjectConfig read permission to the chart.
+- Distinguish applied promotions from ready deployments and refresh status while
+  preserving configuration edits.
+
+See the [workflow guide](docs/verified-release-promotion.md),
+[upgrade runbook](docs/verified-release-upgrade.md), and
+[validation limits](docs/verified-release-e2e.md). These changes are unreleased.
+
 ## 0.1.0 (2026-09-06)
 
 

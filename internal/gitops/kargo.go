@@ -97,7 +97,16 @@ type KargoStage struct {
 // Stage. Kargo v1.x runs promotionTemplate.spec.steps to promote Freight into
 // the Stage (the v0.9 spec.promotionMechanisms field was removed and is silently
 // stripped by the v1.x admission webhook).
+type StageVerification struct {
+	AnalysisTemplates []AnalysisTemplateReference `yaml:"analysisTemplates"`
+}
+type AnalysisTemplateReference struct {
+	Name string `yaml:"name"`
+}
+
 type StageSpec struct {
+	Verification *StageVerification `yaml:"verification,omitempty"`
+
 	RequestedFreight  []FreightRequest   `yaml:"requestedFreight"`
 	PromotionTemplate *PromotionTemplate `yaml:"promotionTemplate,omitempty"`
 }
@@ -172,6 +181,9 @@ type KargoImage struct {
 
 // KargoBuildOptions carries the Kargo-specific options used by the builders.
 type KargoBuildOptions struct {
+	SyncAutomated bool
+	ArgoCDRepoURL string
+	ChartMode     AppMetadataChartType
 	// KargoNamespace is the Kubernetes namespace for Kargo CRs (= Kargo project).
 	// Defaults to the suparship project name.
 	KargoNamespace string
@@ -319,10 +331,17 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 	if opts.Composed {
 		promoTemplate = buildComposedPromotionTemplate(app, env, opts)
 	} else {
-		valuesFilePath := joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "values.yaml")
+		valuesFilePath := joinSubPath(opts.SubPath, releaseEnvTree(opts), env.EnvName, app.ProjectName, app.Name, "values.yaml")
 		promoTemplate = buildPromotionTemplate(app, env, opts, valuesFilePath)
 	}
 
+	var verification *StageVerification
+	if names := app.Spec.CD.Verification[env.EnvName]; len(names) > 0 {
+		verification = &StageVerification{}
+		for _, name := range names {
+			verification.AnalysisTemplates = append(verification.AnalysisTemplates, AnalysisTemplateReference{Name: name})
+		}
+	}
 	return &KargoStage{
 		APIVersion: kargoAPIVersion,
 		Kind:       kargoKindStage,
@@ -341,6 +360,7 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 			),
 		},
 		Spec: StageSpec{
+			Verification: verification,
 			RequestedFreight: []FreightRequest{
 				{
 					Origin:  FreightOrigin{Kind: "Warehouse", Name: app.Name},
@@ -405,6 +425,7 @@ func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts Kar
 		},
 		{
 			Uses: "git-commit",
+			As:   "commit",
 			Config: map[string]any{
 				"path":    "./src",
 				"message": fmt.Sprintf("promote %s/%s to %s", app.ProjectName, app.Name, env.EnvName),
@@ -417,12 +438,27 @@ func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts Kar
 		{
 			Uses: "argocd-update",
 			Config: map[string]any{
-				"apps": argoUpdateApps(opts.ArgoAppNamePattern, app.ProjectName, app.Name, env.EnvName, opts.Clusters),
+				"apps": releaseArgoUpdateApps(app, env, opts),
 			},
 		},
 	}
 
-	return &PromotionTemplate{Spec: PromotionTemplateSpec{Steps: steps}}
+	// Single-source fan-out writes every cluster's values, just like composed apps.
+	if len(opts.Clusters) > 1 {
+		expanded := []PromotionStep{}
+		for _, step := range steps {
+			if step.Uses != "yaml-update" {
+				expanded = append(expanded, step)
+				continue
+			}
+			for _, cluster := range opts.Clusters {
+				expanded = append(expanded, PromotionStep{Uses: "yaml-update", Config: map[string]any{"path": "./src/" + joinSubPath(opts.SubPath, releaseEnvTree(opts), env.EnvName, "_clusters", cluster.Name, app.ProjectName, app.Name, "values.yaml"), "updates": updates}})
+			}
+		}
+		steps = expanded
+	}
+
+	return &PromotionTemplate{Spec: PromotionTemplateSpec{Steps: activatePreparedRelease(steps, app, env, opts)}}
 }
 
 // buildComposedPromotionTemplate is the composed counterpart of
@@ -501,6 +537,7 @@ func buildComposedPromotionTemplate(app *domain.App, env domain.AppEnvironment, 
 	steps = append(steps,
 		PromotionStep{
 			Uses: "git-commit",
+			As:   "commit",
 			Config: map[string]any{
 				"path":    "./src",
 				"message": fmt.Sprintf("promote %s/%s to %s", app.ProjectName, app.Name, env.EnvName),
@@ -510,11 +547,11 @@ func buildComposedPromotionTemplate(app *domain.App, env domain.AppEnvironment, 
 		PromotionStep{
 			Uses: "argocd-update",
 			Config: map[string]any{
-				"apps": argoUpdateApps(opts.ArgoAppNamePattern, app.ProjectName, app.Name, env.EnvName, opts.Clusters),
+				"apps": releaseArgoUpdateApps(app, env, opts),
 			},
 		},
 	)
-	return &PromotionTemplate{Spec: PromotionTemplateSpec{Steps: steps}}
+	return &PromotionTemplate{Spec: PromotionTemplateSpec{Steps: activatePreparedRelease(steps, app, env, opts)}}
 }
 
 // argoUpdateApps renders the argocd-update step's app list: one ArgoCD
@@ -611,10 +648,10 @@ func BuildKargoPromotionPolicies(envs []KargoProjectEnv) []KargoPromotionPolicy 
 		policies = append(policies, KargoPromotionPolicy{
 			Stage: KargoStageName(env.AppName, env.EnvName),
 			// Staging always auto-promotes from the Warehouse. Downstream stages
-			// (prod) auto-promote only when the app opts in, so the same verified
-			// freight advances staging→prod without a manual promotion. A pinned
+			// (prod) are scheduled by Suparship after verification and destination
+			// preparation; there must not be two automatic schedulers. A pinned
 			// stage is frozen — auto-promotion is off so the pinned image holds.
-			AutoPromotionEnabled: (env.IsFirstStage || env.AutoPromote) && !env.Pinned,
+			AutoPromotionEnabled: env.IsFirstStage && !env.Pinned,
 		})
 	}
 	return policies

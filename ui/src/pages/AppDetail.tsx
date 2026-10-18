@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents, getAppGitopsDrift } from "../lib/apps";
+import { getPromotionCandidates, fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents, getAppGitopsDrift } from "../lib/apps";
 import type { RetemplateWarning, AppGitopsDrift } from "../lib/apps";
 import type { ClusterValueOverride, RollbackCandidate, RollbackCandidatesResponse, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
@@ -144,8 +144,13 @@ function formatTime(iso?: string): string {
 function getPromoteTarget(
   currentEnv: AppEnvironmentSummary | null,
   environments: AppEnvironmentSummary[],
+  sources?: Record<string, string>,
 ): { source: string; target: string } | null {
   if (!currentEnv) return null;
+  if (sources) {
+    const target = environments.find(env => sources[env.envName] === currentEnv.envName);
+    return target ? { source: currentEnv.envName, target: target.envName } : null;
+  }
   // Promotion advances freight between Kargo Stages (stable→stable only).
   // Previews have no Stage: their build reaches staging by merging the PR
   // (auto-promotes) or via Pin (deploy without merging) — not by promotion.
@@ -296,7 +301,7 @@ const icons = {
 const kargoPhaseBadge: Record<string, { bg: string; label: string }> = {
   Pending: { bg: "bg-amber-50 text-amber-700", label: "Pending" },
   Running: { bg: "bg-blue-50 text-blue-700", label: "Running" },
-  Succeeded: { bg: "bg-emerald-50 text-emerald-700", label: "Succeeded" },
+  Succeeded: { bg: "bg-emerald-50 text-emerald-700", label: "Applied" },
   Failed: { bg: "bg-red-50 text-red-700", label: "Failed" },
 };
 
@@ -309,7 +314,7 @@ function KargoPromotionDetail({
   project?: string;
   app?: string;
 }) {
-  const [phase, setPhase] = useState(kargo.phase ?? "Pending");
+  const [phase, setPhase] = useState(kargo.phase || "Pending");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Poll the promotion status every 3 s until it reaches a terminal state.
@@ -330,12 +335,12 @@ function KargoPromotionDetail({
         const status = await getKargoPromotionStatus(project!, app!, kargo.name);
         // available=false → no Kargo status reader; keep the last known phase.
         if (status.available === false) return;
-        setPhase(status.phase);
+        setPhase(status.phase || "Pending");
         if (terminal.has(status.phase)) {
           stopPolling();
           if (status.phase === "Succeeded") {
-            toast.success("Kargo promotion succeeded", {
-              description: `${kargo.stage} is now running the new freight.`,
+            toast.success("Release changes applied", {
+              description: "Check deployment health and verification below before treating the release as ready.",
             });
           } else {
             toast.error("Kargo promotion failed", {
@@ -417,7 +422,7 @@ function KargoPromotionDetail({
       <p className="mt-2 text-xs text-violet-500">
         Track with:{" "}
         <code className="rounded bg-violet-100 px-1 py-0.5 text-violet-700">
-          kubectl get promotions -n {kargo.stage}
+          kubectl get promotions -n kargo-{project}
         </code>
       </p>
     </div>
@@ -550,6 +555,7 @@ function EnvPipelineBar({
   project,
   appName,
   nonPreviewEnvs,
+  promotionSources,
   previewEnvs,
   selectedEnvName,
   onSelect,
@@ -560,6 +566,7 @@ function EnvPipelineBar({
   project: string;
   appName: string;
   nonPreviewEnvs: AppEnvironmentSummary[];
+  promotionSources?: Record<string, string>;
   previewEnvs: AppEnvironmentSummary[];
   selectedEnvName: string | null;
   onSelect: (envName: string) => void;
@@ -692,7 +699,7 @@ function EnvPipelineBar({
       )}
       {/* Pipeline row: stable envs connected by promotion arrows; each env
           carries its previews stacked beneath it. */}
-      <div className="flex flex-wrap items-start gap-0">
+      <div className="flex flex-wrap items-start gap-2">
         {nonPreviewEnvs.map((env, i) => {
           const stage = stageMap[env.envName];
           const isSelected = selectedEnvName === env.envName;
@@ -735,6 +742,11 @@ function EnvPipelineBar({
                   </span>
                 </div>
 
+                {promotionSources && Object.prototype.hasOwnProperty.call(promotionSources, env.envName) && (
+                  <span className={`text-[10px] ${isSelected ? "text-white/70" : "text-gray-500"}`}>
+                    {promotionSources[env.envName] ? `Verified in ${promotionSources[env.envName]}` : "Receives main builds"}
+                  </span>
+                )}
                 {/* Row 2: Kargo phase badge + ArgoCD runtime label — always shown */}
                 <div className="flex flex-wrap items-center gap-1">
                   {/* ArgoCD runtime status */}
@@ -751,7 +763,7 @@ function EnvPipelineBar({
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                       </svg>
                     )}
-                    {runtimeCfg.label}
+                    {stage?.phase === "Idle" ? "Idle" : stage?.phase === "Cleaning" ? "Cleaning up" : stage?.phase === "Preparing" ? "Preparing" : runtimeCfg.label}
                   </span>
 
                   {/* Kargo phase badge (when data available) */}
@@ -819,7 +831,7 @@ function EnvPipelineBar({
               </button>
 
               {/* Promotion arrow between nodes */}
-              {i < nonPreviewEnvs.length - 1 && (
+              {i < nonPreviewEnvs.length - 1 && (!promotionSources || promotionSources[nonPreviewEnvs[i + 1]?.envName ?? ""] === env.envName) && (
                 <svg
                   className="mx-1 h-3.5 w-3.5 flex-shrink-0 text-gray-300"
                   fill="none"
@@ -906,6 +918,30 @@ export function AppDetail() {
   const [showPromoteModal, setShowPromoteModal] = useState(false);
   const [promoteSource, setPromoteSource] = useState("");
   const [promoteTarget, setPromoteTarget] = useState("");
+  const [promoteFreight, setPromoteFreight] = useState("");
+  const [promotionCandidates, setPromotionCandidates] = useState<string[]>([]);
+  const [candidateLabels, setCandidateLabels] = useState<Record<string, string>>({});
+  const [candidatesLoading, setCandidatesLoading] = useState(false);
+  const [verifiedPromotionAvailable, setVerifiedPromotionAvailable] = useState(false);
+  useEffect(() => {
+    if (!showPromoteModal || !project || !appName || !promoteTarget) return;
+    let cancelled = false;
+    setCandidatesLoading(true);
+    setPromotionCandidates([]);
+    setPromoteFreight("");
+    setPromoteError(null);
+    setCandidateLabels({});
+    getPromotionCandidates(project, appName, promoteTarget).then(result => {
+      if (cancelled) return;
+      setVerifiedPromotionAvailable(result.available);
+      setPromotionCandidates(result.releases);
+      setCandidateLabels(Object.fromEntries((result.details ?? []).map(release => [release.name, `${[...new Set(release.images.map(image => image.Tag))].join(", ") || release.name} · ${new Date(release.createdAt).toLocaleString()} · ${release.name.slice(0, 12)}`])));
+      setPromoteFreight(result.releases[0] ?? "");
+    }).catch(() => {
+      if (!cancelled) { setVerifiedPromotionAvailable(true); setPromoteError("Could not load verified releases. Close and retry."); }
+    }).finally(() => { if (!cancelled) setCandidatesLoading(false); });
+    return () => { cancelled = true; };
+  }, [showPromoteModal, project, appName, promoteTarget]);
   const [promoteSubmitting, setPromoteSubmitting] = useState(false);
   const [promoteError, setPromoteError] = useState<string | null>(null);
   const [promoteResult, setPromoteResult] = useState<PromoteResponse | null>(
@@ -998,6 +1034,26 @@ export function AppDetail() {
       cancelled = true;
     };
   }, [project, appName]);
+
+  useEffect(() => {
+    if (!project || !appName) return;
+    let cancelled = false;
+    let inFlight = false;
+    const timer = setInterval(async () => {
+      if (inFlight || document.hidden) return;
+      inFlight = true;
+      try {
+        const res = await getApp(project, appName);
+        if (!cancelled) setData((previous) => previous ? { ...previous, environments: res.app.environments } : res.app);
+        if (selectedEnvName) {
+          const detail = await getAppEnvironment(project, appName, selectedEnvName);
+          if (!cancelled) setSelectedEnvDetail(detail.environment);
+        }
+      } catch { /* Keep the last known state during transient failures. */ }
+      finally { inFlight = false; }
+    }, 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [project, appName, selectedEnvName]);
 
   // Upgrade rows: one per component whose template is version-managed. The
   // versions come from the app detail response (server-side, one pass over the
@@ -1153,6 +1209,7 @@ export function AppDetail() {
     }
     let cancelled = false;
 
+    setSelectedEnvDetail(null);
     getAppEnvironment(project, appName, selectedEnvName)
       .then((res) => {
         if (!cancelled) setSelectedEnvDetail(res.environment);
@@ -1403,7 +1460,7 @@ export function AppDetail() {
           {(() => {
             // Direct-delivery apps have no promotion — each env deploys from values.
             if (data.deliveryMode === "direct") return null;
-            const promotion = getPromoteTarget(currentEnv, data.environments);
+            const promotion = getPromoteTarget(currentEnv, data.environments, data.cd?.promotionSources ?? (data.cd?.releaseValidationEnvironment ? {} : undefined));
             if (!promotion) return null;
             // Nothing deployed in the source env yet — there's nothing to
             // promote and the endpoint would refuse; don't invite the click.
@@ -1441,6 +1498,7 @@ export function AppDetail() {
                 onClick={() => {
                   setPromoteSource(promotion.source);
                   setPromoteTarget(promotion.target);
+                  setPromoteFreight("");
                   setPromoteError(null);
                   setPromoteResult(null);
                   setShowPromoteModal(true);
@@ -1679,6 +1737,15 @@ export function AppDetail() {
                   </div>
                 </div>
 
+                {verifiedPromotionAvailable && <label className="mt-4 block text-sm">
+                  Verified release
+                  <select className="mt-1 w-full rounded border px-3 py-2" value={promoteFreight}
+                    onChange={(event) => setPromoteFreight(event.target.value)} disabled={promoteSubmitting || candidatesLoading}>
+                    {promotionCandidates.length === 0 && <option value="">{candidatesLoading ? "Loading verified releases…" : promoteError ? "Release verification unavailable" : "No verified releases available"}</option>}
+                    {promotionCandidates.map(release => <option key={release} value={release}>{candidateLabels[release] ?? release}</option>)}
+                  </select>
+                  <span className="mt-1 block text-xs text-slate-500">Promotes this release without changing the upstream environment. Verification is checked again when submitted.</span>
+                </label>}
                 {promoteError && (
                   <div className="mt-3 rounded-md bg-red-50 px-3 py-2">
                     <p className="text-sm text-red-700">{promoteError}</p>
@@ -1693,6 +1760,7 @@ export function AppDetail() {
                       try {
                         const result = await promoteApp(project, appName, {
                           targetEnvironment: promoteTarget,
+                          freight: promoteFreight.trim() || undefined,
                         });
                         setPromoteResult(result);
                         if (result.kargoPromotion) {
@@ -1712,7 +1780,7 @@ export function AppDetail() {
                         setPromoteSubmitting(false);
                       }
                     }}
-                    disabled={promoteSubmitting || !promoteTarget}
+                    disabled={promoteSubmitting || !promoteTarget || candidatesLoading || (verifiedPromotionAvailable && !promoteFreight)}
                     className="flex-1 rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50"
                   >
                     {promoteSubmitting ? "Promoting…" : `Promote to ${promoteTarget}`}
@@ -2229,6 +2297,7 @@ export function AppDetail() {
           project={project ?? ""}
           appName={appName ?? ""}
           nonPreviewEnvs={nonPreviewEnvs}
+          promotionSources={data.cd?.promotionSources}
           previewEnvs={previewEnvs}
           selectedEnvName={selectedEnvName}
           onSelect={setSelectedEnvName}
@@ -2575,6 +2644,10 @@ function AppValuesEditor({
   const [templateLayer, setTemplateLayer] = useState<string>("");
   const [cdManaged, setCdManaged] = useState(false);
   const [autoPromote, setAutoPromote] = useState(false);
+  const [validationEnvironment, setValidationEnvironment] = useState("");
+  const [validationMode, setValidationMode] = useState<"persistent" | "ephemeral">("persistent");
+  const [separateValidation, setSeparateValidation] = useState(false);
+  const [verification, setVerification] = useState<Record<string, string>>({});
   const [cdSaving, setCdSaving] = useState(false);
   const [previewsEnabled, setPreviewsEnabled] = useState(true);
   const [deliveryMode, setDeliveryMode] = useState("pipeline");
@@ -2642,7 +2715,9 @@ function AppValuesEditor({
   const baselineReposRef = useRef<ReadonlySet<string> | null>(null);
   const [imagesSaving, setImagesSaving] = useState(false);
 
-  // Seed editors from the persisted overlays whenever the app data changes.
+  const environmentConfigKey = JSON.stringify((data.environments ?? []).map(env => [env.envName, env.deploy]));
+  // Health-only updates must not reset unsaved settings.
+
   useEffect(() => {
     setBaseText(stringifyOverlay(data.rawValues));
     const next: Record<string, string> = {};
@@ -2654,6 +2729,10 @@ function AppValuesEditor({
     setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
     setAutoPromote(data.cd?.autoPromote ?? false);
+    setValidationEnvironment(data.cd?.releaseValidationEnvironment ?? "");
+    setValidationMode(data.cd?.releaseValidationMode === "ephemeral" ? "ephemeral" : "persistent");
+    setSeparateValidation(Boolean(data.cd?.releaseValidationEnvironment));
+    setVerification(Object.fromEntries(Object.entries(data.cd?.verification ?? {}).map(([env, names]) => [env, names.join(", ")])));
     setPreviewsEnabled(data.previewsEnabled ?? true);
     setDeliveryMode(data.deliveryMode === "direct" ? "direct" : "pipeline");
     const de: Record<string, boolean> = {};
@@ -2662,7 +2741,7 @@ function AppValuesEditor({
     }
     setDeployEnvs(de);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data]);
+  }, [data.rawValues, data.envRawValues, data.cd, data.previewsEnabled, data.deliveryMode, environmentConfigKey]);
 
   // Seed the per-unique-image CD rules from the app's saved bindings (or
   // inherit-from-template declared defaults when none), grouped by repository. On a
@@ -2812,7 +2891,10 @@ function AppValuesEditor({
 
   const cdDirty =
     cdManaged !== (data.cd?.managed ?? false) ||
-    autoPromote !== (data.cd?.autoPromote ?? false);
+    autoPromote !== (data.cd?.autoPromote ?? false) ||
+    (separateValidation ? validationEnvironment : "") !== (data.cd?.releaseValidationEnvironment ?? "") ||
+    (separateValidation ? validationMode : "persistent") !== (data.cd?.releaseValidationMode || "persistent") ||
+    JSON.stringify(verification) !== JSON.stringify(Object.fromEntries(Object.entries(data.cd?.verification ?? {}).map(([env, names]) => [env, names.join(", ")])));
   // Direct-delivery apps deploy each env from values — no Kargo, so the CD +
   // image-selection sections don't apply. Derived from the live selector so the
   // sections toggle as the user switches mode.
@@ -2992,7 +3074,7 @@ function AppValuesEditor({
     setCdSaving(true);
     const progress = toast.loading("Saving CD settings — publishing to GitOps…");
     try {
-      await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote } });
+      await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote, releaseValidationEnvironment: separateValidation ? validationEnvironment : "", releaseValidationMode: separateValidation ? validationMode : "persistent", verification: Object.fromEntries(Object.entries(verification).map(([env, names]) => [env, names.split(",").map(name => name.trim()).filter(Boolean)])) } });
       toast.success("CD settings saved and published to GitOps.", { id: progress });
       await onSaved();
     } catch (err) {
@@ -3481,13 +3563,47 @@ function AppValuesEditor({
                   Auto-promote to prod
                 </label>
                 <p className="mt-1 text-xs text-gray-400">
-                  Promotes the same image to prod automatically once it's deployed and
-                  healthy in staging — no manual step. Manual “Promote” still works.
+                  Promotes a verified release automatically after the upstream rollout and configured checks pass. A pinned source does not block releases already verified.
                 </p>
+                <label className="mt-4 flex items-center gap-2 text-sm font-medium text-gray-700">
+                  <input type="checkbox" checked={separateValidation} onChange={event => { setSeparateValidation(event.target.checked); if (event.target.checked) setCdManaged(true); }} />
+                  Use a separate release validation environment
+                </label>
+                <p className="mt-1 text-xs text-gray-500">Optional. Keep new releases moving while staging is pinned. Choose whether validation workloads stay running between releases.</p>
+                {separateValidation && (
+                  <div className="mt-2 space-y-2">
+                    <label className="block text-xs font-medium text-gray-700">
+                      Validation environment
+                      <select className="mt-1 block w-full rounded border border-gray-300 px-2 py-1" value={validationEnvironment} onChange={event => setValidationEnvironment(event.target.value)}>
+                        <option value="">Choose an environment</option>
+                        {orgEnvs.filter(env => env.name !== "prod" && env.name !== "production" && env.name !== data.environments.find(e => e.isBase)?.envName && (env.clusterRefs?.length ?? 0) > 0).map(env => <option key={env.name} value={env.name}>{env.displayName || env.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="block text-xs font-medium text-gray-700">
+                      Validation lifecycle
+                      <select className="mt-1 block w-full rounded border border-gray-300 px-2 py-1" value={validationMode} onChange={event => setValidationMode(event.target.value as "persistent" | "ephemeral")}>
+                        <option value="persistent">Persistent (default)</option>
+                        <option value="ephemeral">Ephemeral — create for each release</option>
+                      </select>
+                    </label>
+                    <p className="text-xs text-gray-500">{validationMode === "ephemeral" ? "Creates workloads for validation, then deletes them after checks pass. Failed runs remain for one hour for debugging. All chart-managed resources are disposable; keep databases and other persistent data outside this environment. Namespace and platform configuration remain. One run at a time; newer queued builds are combined into the latest release." : "Workloads stay running between releases and consume resources continuously. Use this for stable endpoints or stateful dependencies."}</p>
+                    <p className="text-xs text-gray-500">Create and bind a separate environment in Settings → Environments first. Configure its databases, queues, secrets and external-service test accounts independently. Existing pins stay in place.</p>
+                    {validationEnvironment && <p className="text-xs text-gray-700">Main builds → {validationEnvironment} → downstream release environments. The base staging environment receives main builds independently when unpinned. Configure acceptance checks for {validationEnvironment} below; checks are not copied from staging.</p>}
+                    <p className="text-xs text-gray-500">Disabling restores the ordered pipeline. For ephemeral validation, wait until cleanup finishes before changing lifecycle or environment. Pins and rollbacks require persistent mode; suspension pauses new runs.</p>
+                  </div>
+                )}
+                <p className="mt-3 text-sm font-medium text-gray-700">Acceptance checks</p>
+                <p className="mt-1 text-xs text-gray-500">Enter existing AnalysisTemplate names, separated by commas. Templates must exist in the project's Kargo namespace. Empty means rollout health checks only.</p>
+                {Array.from(new Set([...envs, ...(separateValidation && validationEnvironment ? [validationEnvironment] : [])])).filter(env => env !== PREVIEW_SCOPE).map(env => (
+                  <label key={env} className="mt-2 block text-xs text-gray-600">
+                    {env}
+                    <input className="mt-1 block w-full rounded border border-gray-300 px-2 py-1" value={verification[env] ?? ""} placeholder="smoke-tests, integration-tests" onChange={event => setVerification(previous => ({ ...previous, [env]: event.target.value }))} />
+                  </label>
+                ))}
               </div>
               <button
                 onClick={saveCD}
-                disabled={cdSaving || !cdDirty}
+                disabled={cdSaving || !cdDirty || (separateValidation && !validationEnvironment)}
                 className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
               >
                 {cdSaving ? "Saving…" : "Save CD"}

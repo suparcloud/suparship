@@ -45,6 +45,12 @@ suparship-backup.yaml`) and roll the chart back.
 
 ### Unreleased (next)
 
+- **Verified-release promotion (generator v0.4.0).** Previously verified releases
+  can advance while staging is pinned. Downstream automatic promotion now waits
+  for live Kargo scheduler handoff. Upgrade chart permissions with the server and
+  follow the [dedicated runbook](verified-release-upgrade.md), including its
+  history compatibility and validation limits.
+
 - **Source-namespaced templates.** New template sources default to
   *Namespace templates by source*: their charts import as `<source>.<chart>`.
   Existing sources are untouched (bare names, global uniqueness) until you

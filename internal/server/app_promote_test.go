@@ -34,9 +34,9 @@ func newTestAppPromoteMux(projectName string) (*http.ServeMux, *authHandler, *me
 	store.mu.Unlock()
 
 	rh := &rbacHandler{
-		auth:        ah,
-		orgStore: &staticOrgProvider{org: testRBACOrg()},
-		appHandler:  newAppHandler(store, nil, nil, nil),
+		auth:       ah,
+		orgStore:   &staticOrgProvider{org: testRBACOrg()},
+		appHandler: newAppHandler(store, nil, nil, nil),
 	}
 	rh.registerRoutes(mux)
 
@@ -557,7 +557,7 @@ type recordingPublisher struct {
 	// publishedEnvApps records the app value passed to each PublishAppEnv call
 	// (the promote path passes a transient clone carrying the source-tag pin).
 	publishedEnvApps []*domain.App
-	removedEnvs   []string
+	removedEnvs      []string
 	// batchCalls counts PublishAppsEnv invocations; batchTargets records the
 	// number of targets in each, so a test can assert one batched git op.
 	batchCalls   int
@@ -644,9 +644,9 @@ func newTestAppPromoteMuxWithPublisher(projectName string, pub GitOpsPublisher) 
 	appH.gitOpsPublisher = pub
 
 	rh := &rbacHandler{
-		auth:        ah,
-		orgStore: &staticOrgProvider{org: testRBACOrg()},
-		appHandler:  appH,
+		auth:       ah,
+		orgStore:   &staticOrgProvider{org: testRBACOrg()},
+		appHandler: appH,
 	}
 	rh.registerRoutes(mux)
 
@@ -835,10 +835,8 @@ func TestPromote_ProceedsWhenTargetArgoAppExists(t *testing.T) {
 	}
 }
 
-// A broken gate (dynamic client error) must not freeze promotions — fail open
-// with a logged warning rather than blocking every release on an RBAC or API
-// hiccup.
-func TestPromote_GateErrorFailsOpen(t *testing.T) {
+// An unreadable target must not queue a deployment.
+func TestPromote_GateErrorFailsClosed(t *testing.T) {
 	promoter := &recordingPromoter{}
 	gate := &fakeArgoAppGate{err: fmt.Errorf("rbac denied")}
 	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, &recordingPublisher{}, promoter, gate)
@@ -849,11 +847,11 @@ func TestPromote_GateErrorFailsOpen(t *testing.T) {
 	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
 		AppPromoteRequest{TargetEnvironment: "prod"})
 
-	if resp.Code != http.StatusOK {
-		t.Fatalf("gate error should fail open, got %d: %s", resp.Code, resp.Body.String())
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("gate error must fail closed, got %d: %s", resp.Code, resp.Body.String())
 	}
-	if promoter.calls != 1 {
-		t.Errorf("promotion should proceed on gate error, calls=%d", promoter.calls)
+	if promoter.calls != 0 {
+		t.Errorf("promotion must not proceed on gate error, calls=%d", promoter.calls)
 	}
 }
 
@@ -875,7 +873,6 @@ func TestPromote_NoGateWiredProceeds(t *testing.T) {
 		t.Errorf("expected one promotion, got %d", promoter.calls)
 	}
 }
-
 
 // fakeChainNudger records ArgoCD chain-nudge calls during the gate wait.
 type fakeChainNudger struct {
@@ -937,7 +934,7 @@ func TestPromote_NudgesArgoChainWhileWaiting(t *testing.T) {
 			break
 		}
 	}
-	wantSets := []string{"prod", "prod-platform"}
+	wantSets := []string{"prod", "prod-platform", "prod-external"}
 	for i, n := range nudger.appSetNames[0] {
 		if n != wantSets[i] {
 			t.Errorf("nudged appsets = %v, want %v", nudger.appSetNames[0], wantSets)
@@ -979,7 +976,6 @@ func TestPromote_PublishesTargetWithSourceTagPinned(t *testing.T) {
 		t.Error("stored app spec must be unmutated by the transient publish pin")
 	}
 }
-
 
 // An initial promotion where NOTHING has flowed through the CD pipeline yet:
 // the source Stage has no Freight, but the publish already pinned the source
@@ -1036,7 +1032,6 @@ func TestPromote_NoFreightWithoutPublisherStillFails(t *testing.T) {
 		t.Errorf("expected the no-freight error to surface, got: %s", resp.Body.String())
 	}
 }
-
 
 // ANY Kargo failure — not just missing freight — degrades to the git-pin
 // mechanism when the pinned publish happened: the user's release ships, and

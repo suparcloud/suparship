@@ -742,6 +742,18 @@ func (s *Server) StartAutoPromoteLoop(ctx context.Context, interval time.Duratio
 	if s.appHandler == nil || interval <= 0 {
 		return
 	}
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.appHandler.runEphemeralValidationOnce(ctx)
+			}
+		}
+	}()
 	s.logger.Info("cd auto-promotion reconciler enabled", "interval", interval)
 	ticker := time.NewTicker(interval)
 	go func() {
@@ -1244,4 +1256,35 @@ func (s *Server) waitBackground(timeout time.Duration) {
 	if s.bgCancel != nil {
 		s.bgCancel()
 	}
+}
+
+// verifiedReleasePromoter submits a selected release without publishing or approving it.
+type verifiedReleasePromoter interface {
+	PromoteVerifiedRelease(context.Context, string, string, string, string, string) (KargoPromotionResult, error)
+}
+
+// Preparation must fail closed when an older publisher is installed; unlike
+// ordinary publishing, a no-op here cannot safely authorize a promotion.
+func (h *PublisherHolder) PrepareAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	preparer, ok := p.(interface {
+		PrepareAppEnv(context.Context, *domain.App, *domain.AppEnvironment) error
+	})
+	if !ok {
+		return fmt.Errorf("publisher does not support prepared releases")
+	}
+	return preparer.PrepareAppEnv(ctx, app, env)
+}
+
+func (h *PublisherHolder) SetValidationWorkloads(ctx context.Context, app *domain.App, env *domain.AppEnvironment, active bool) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	publisher, ok := p.(validationWorkloadPublisher)
+	if !ok {
+		return fmt.Errorf("publisher does not support ephemeral validation")
+	}
+	return publisher.SetValidationWorkloads(ctx, app, env, active)
 }

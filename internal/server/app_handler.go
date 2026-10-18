@@ -204,6 +204,11 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := validateVerificationConfig(req.CD); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
 	if err := domain.ValidateAppName(req.Name); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
@@ -509,6 +514,10 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// Falls back to the hardcoded defaults when no org provider is configured.
 	result.Environments = ah.stableEnvsFromOrg(r.Context(), result.App)
 
+	if err := ah.validateReleaseValidation(r.Context(), result.App, result.Environments); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
 	if err := ah.appStore.SaveApp(r.Context(), projectName, result.App); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
 		return
@@ -589,6 +598,10 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// CD validation must not mutate a store-owned app before persistence.
+	appCopy := *app
+	app = &appCopy
 
 	if req.Template != "" && req.Template != app.Spec.Template.Name {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
@@ -776,7 +789,20 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		app.Spec.EnvironmentDefaults = ed
 	}
 	if req.CD != nil {
+		if err := validateVerificationConfig(req.CD); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
 		cd := cdConfigFromDTO(req.CD)
+		if req.CD.ReleaseValidationMode == nil {
+			cd.ReleaseValidationMode = app.Spec.CD.ReleaseValidationMode
+		}
+		if req.CD.ReleaseValidationEnvironment == nil {
+			cd.ReleaseValidationEnvironment = app.Spec.CD.ReleaseValidationEnvironment
+		}
+		if req.CD.Verification == nil {
+			cd.Verification = app.Spec.CD.Verification
+		}
 		// Preserve the image-config intent across a CD-only edit (managed/autoPromote
 		// toggle) — the DTO doesn't carry it, so a bare replacement would silently
 		// reset it and re-enable template auto-bind.
@@ -893,6 +919,47 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		app.Spec.EnvironmentDefaults = ed
 	}
 
+	validationEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "could not read deployment environments"})
+		return
+	}
+	var addedValidationEnv *domain.AppEnvironment
+	if name := app.Spec.CD.ReleaseValidationEnvironment; name != "" {
+		found := false
+		for _, env := range validationEnvs {
+			if env.EnvName == name {
+				found = true
+			}
+		}
+		if !found {
+			for _, env := range ah.stableEnvsFromOrg(r.Context(), app) {
+				if env.EnvName == name {
+					addedValidationEnv = env
+					validationEnvs = append(validationEnvs, env)
+					break
+				}
+			}
+		}
+	}
+	if err := ah.validateReleaseValidation(r.Context(), app, validationEnvs); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+	if (prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment || prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode) && ah.kargoPipelineReader != nil {
+		stages, err := ah.kargoPipelineReader.ListAppStageStatuses(r.Context(), projectName, appName)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "could not verify pipeline is idle"})
+			return
+		}
+		for _, stage := range stages {
+			if stage.Phase == "Promoting" || stage.Phase == "Verifying" {
+				writeJSON(w, http.StatusConflict, errorResponse{Error: "wait for active promotions and verification to finish before changing the validation environment"})
+				return
+			}
+		}
+	}
+
 	// The slow half — persist + full gitops publish — runs through dispatchOp so
 	// a caller can opt into async (Prefer: respond-async / ?async=1) and poll
 	// .../tasks/{id} for the result instead of holding the request open through
@@ -900,7 +967,19 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	// render per env + Kargo CRs) routinely outlives gateway timeouts. All
 	// request validation already ran synchronously above, so bad input still
 	// fails fast even in async mode.
-	op := func(ctx context.Context) (int, any, error) {
+	op := func(ctx context.Context) (status int, result any, opErr error) {
+		if addedValidationEnv != nil {
+			if err := ah.appStore.SaveAppEnvironment(ctx, projectName, addedValidationEnv); err != nil {
+				return http.StatusInternalServerError, nil, fmt.Errorf("save validation environment: %w", err)
+			}
+			defer func() {
+				if opErr != nil {
+					_ = ah.appStore.DeleteAppEnvironment(ctx, projectName, appName, addedValidationEnv.EnvName)
+					app.Spec.CD = prevCD
+					_ = ah.appStore.SaveApp(ctx, projectName, app)
+				}
+			}()
+		}
 		if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
 			return http.StatusInternalServerError, nil, errors.New("failed to save app")
 		}
@@ -940,6 +1019,30 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		saved, _ := ah.appStore.GetApp(ctx, projectName, appName)
 		savedEnvs, _ := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
 		return http.StatusOK, updateAppResponse{App: appToDetailDTO(saved, savedEnvs)}, nil
+	}
+	if prevCD.EphemeralValidation() {
+		original := op
+		op = func(ctx context.Context) (int, any, error) {
+			controller, ok := ah.kargoPromoter.(validationRunController)
+			if !ok {
+				return http.StatusServiceUnavailable, nil, fmt.Errorf("validation lifecycle controller unavailable")
+			}
+			status := http.StatusConflict
+			var result any
+			err := controller.WithValidationLease(ctx, projectName, appName, prevCD.ReleaseValidationEnvironment, func(ctx context.Context, run *domain.ValidationRun) error {
+				changed := prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode || prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment
+				if changed && run.Phase != "idle" {
+					return fmt.Errorf("wait for validation cleanup to finish before changing lifecycle or validation environment")
+				}
+				var err error
+				status, result, err = original(ctx)
+				if err == nil && changed {
+					*run = domain.ValidationRun{}
+				}
+				return err
+			})
+			return status, result, err
+		}
 	}
 	dispatchOp(w, r, ah.async, "update-app", projectName, op)
 }
@@ -2882,6 +2985,10 @@ func (ah *appHandler) handleUndeployAppEnv(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if envName == app.Spec.CD.ReleaseValidationEnvironment {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "choose another validation environment or disable separate release validation before removing this environment"})
+		return
+	}
 	// The base env (lowest Order) is the pipeline's warehouse source and the
 	// previews' clone target — removing it would break both. Only envs above the
 	// base can be decommissioned.
@@ -2992,16 +3099,20 @@ const rollbackPinnedFrom = "rollback"
 // to status codes, and let the stack batch path classify a failure as
 // "skip this member" (not applicable) vs a real error.
 var (
-	errPinAppNotFound     = errors.New("app not found")
-	errPinNotPipeline     = errors.New("pinning applies to pipeline-delivery apps only")
-	errPinTargetNotFound  = errors.New("target environment not found")
-	errPinTargetIsPreview = errors.New("cannot pin a preview environment")
-	errPinPreviewNotFound = errors.New("source preview not found")
-	errPinNoTag           = errors.New("source preview has no image tag")
+	errPinAppNotFound       = errors.New("app not found")
+	errPinNotPipeline       = errors.New("pinning applies to pipeline-delivery apps only")
+	errPinTargetNotFound    = errors.New("target environment not found")
+	errPinTargetIsPreview   = errors.New("cannot pin a preview environment")
+	errPinPreviewNotFound   = errors.New("source preview not found")
+	errPinNoTag             = errors.New("source preview has no image tag")
+	errValidationControlled = errors.New("ephemeral validation is controller-managed; use persistent mode for pins or rollbacks")
 )
 
 // statusForPinErr maps a pinAppEnv/unpinAppEnv error to an HTTP status.
 func statusForPinErr(err error) int {
+	if errors.Is(err, errValidationControlled) {
+		return http.StatusConflict
+	}
 	switch {
 	case errors.Is(err, errPinAppNotFound), errors.Is(err, errPinTargetNotFound), errors.Is(err, errPinPreviewNotFound):
 		return http.StatusNotFound
@@ -3096,6 +3207,10 @@ func (ah *appHandler) pinAppEnvSpec(ctx context.Context, projectName, appName, e
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
 	}
+	if app.Spec.CD.EphemeralValidation() && envName == app.Spec.CD.ReleaseValidationEnvironment {
+		return nil, nil, "", errValidationControlled
+	}
+
 	if app.Spec.IsDirect() {
 		return nil, nil, "", errPinNotPipeline
 	}
@@ -3254,6 +3369,11 @@ func (ah *appHandler) handlePinAppEnv(w http.ResponseWriter, r *http.Request) {
 	appName := r.PathValue("app")
 	envName := r.PathValue("env")
 
+	if app, err := ah.appStore.GetApp(r.Context(), projectName, appName); err == nil && app.Spec.CD.EphemeralValidation() && app.Spec.CD.ReleaseValidationEnvironment == envName {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "ephemeral validation is controller-managed; use a persistent environment for pins or rollbacks"})
+		return
+	}
+
 	var req pinAppEnvRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
@@ -3315,6 +3435,9 @@ var (
 )
 
 func statusForRollbackErr(err error) int {
+	if errors.Is(err, errValidationControlled) {
+		return http.StatusConflict
+	}
 	switch {
 	case errors.Is(err, errRollbackUnavailable):
 		return http.StatusServiceUnavailable
@@ -3345,6 +3468,10 @@ func (ah *appHandler) rollbackAppEnvSpec(ctx context.Context, projectName, appNa
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
 	}
+	if app.Spec.CD.EphemeralValidation() && envName == app.Spec.CD.ReleaseValidationEnvironment {
+		return nil, nil, nil, errValidationControlled
+	}
+
 	if app.Spec.IsDirect() {
 		return nil, nil, nil, errPinNotPipeline
 	}
@@ -3455,6 +3582,11 @@ func (ah *appHandler) handleRollbackAppEnv(w http.ResponseWriter, r *http.Reques
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
 	envName := r.PathValue("env")
+
+	if app, err := ah.appStore.GetApp(r.Context(), projectName, appName); err == nil && app.Spec.CD.EphemeralValidation() && app.Spec.CD.ReleaseValidationEnvironment == envName {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "ephemeral validation is controller-managed; use a persistent environment for pins or rollbacks"})
+		return
+	}
 
 	var req rollbackAppEnvRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3728,7 +3860,7 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := ah.promoteAppEnv(r.Context(), projectName, appName, req.TargetEnvironment)
+	resp, err := ah.promoteAppEnv(r.Context(), projectName, appName, req.TargetEnvironment, req.Freight)
 	if err != nil {
 		writeJSON(w, statusForPromoteErr(err), errorResponse{Error: err.Error()})
 		return
@@ -3758,7 +3890,7 @@ func statusForPromoteErr(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, errPromoteBadRequest), errors.Is(err, domainapp.ErrNoRelease):
 		return http.StatusBadRequest
-	case errors.Is(err, errPromoteTargetNotReady):
+	case errors.Is(err, errPromoteTargetNotReady), errors.Is(err, kube.ErrPromotionBusy):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
@@ -3768,8 +3900,7 @@ func statusForPromoteErr(err error) int {
 // waitForTargetArgoApp polls the ArgoCD Application gate until the target
 // env's generated Application exists, the timeout lapses, or ctx is done.
 //
-// Fail-open on gate ERRORS (a broken dynamic client must not freeze every
-// promotion — log and proceed) but fail-closed on definitive absence. Nil gate
+// Fail closed when the target cannot be read or is absent. Nil gate
 // (fake mode, no dynamic client) means no check, preserving prior behavior.
 func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, appName, envName string) error {
 	if ah.argoAppGate == nil {
@@ -3791,15 +3922,15 @@ func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, app
 			if err := ah.argoChainNudger.RefreshAppsByName(ctx, []string{"suparship-apps", envName + "-composed"}); err != nil {
 				slog.Debug("promote: argocd chain nudge (apps) failed", "env", envName, "err", err)
 			}
-			if err := ah.argoChainNudger.RefreshAppSets(ctx, []string{envName, envName + "-platform"}); err != nil {
+			if err := ah.argoChainNudger.RefreshAppSets(ctx, []string{envName, envName + "-platform", envName + "-external"}); err != nil {
 				slog.Debug("promote: argocd chain nudge (appsets) failed", "env", envName, "err", err)
 			}
 		}
 		exists, err := ah.argoAppGate.HasAppForEnv(ctx, projectName, appName, envName)
 		if err != nil {
-			slog.Warn("promote: ArgoCD application check failed — proceeding without the gate",
+			slog.Warn("promote: ArgoCD application check failed — refusing promotion",
 				"project", projectName, "app", appName, "env", envName, "err", err)
-			return nil
+			return fmt.Errorf("read target application: %w", err)
 		}
 		if exists {
 			return nil
@@ -3821,7 +3952,7 @@ func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, app
 // creates a Kargo Promotion CR (when Kargo is wired) or copies the release
 // bundle in the local store. It is the shared core of the per-app promote
 // handler and the stack batch promote. Returns the populated response.
-func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, targetEnvName string) (*AppPromoteResponse, error) {
+func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, targetEnvName string, selectedFreight ...string) (*AppPromoteResponse, error) {
 	app, err := ah.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
 		return nil, fmt.Errorf("%w: app %q not found in project %q", errPromoteAppNotFound, appName, projectName)
@@ -3854,6 +3985,62 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	sourceEnv, err := ah.findPromotionSource(ctx, projectName, appName, targetEnv)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", errPromoteBadRequest, err.Error())
+	}
+
+	freight := ""
+	if len(selectedFreight) > 0 {
+		freight = selectedFreight[0]
+	}
+	promoter, supportsVerified := ah.kargoPromoter.(verifiedReleasePromoter)
+	if supportsVerified || freight != "" {
+		if !supportsVerified {
+			return nil, fmt.Errorf("%w: verified release promotion requires Kargo", errPromoteBadRequest)
+		}
+
+		if ah.argoAppGate != nil {
+			exists, err := ah.argoAppGate.HasAppForEnv(ctx, projectName, appName, targetEnvName)
+			if err != nil {
+				return nil, fmt.Errorf("read target application: %w", err)
+			}
+			if !exists {
+				preparer, canPrepare := ah.gitOpsPublisher.(interface {
+					PrepareAppEnv(context.Context, *domain.App, *domain.AppEnvironment) error
+				})
+				resolver, canResolve := ah.kargoPromoter.(interface {
+					ResolveVerifiedRelease(context.Context, string, string, string, string, string) (string, error)
+				})
+				if !canPrepare || !canResolve {
+					return nil, fmt.Errorf("%w: target preparation is unavailable", errPromoteTargetNotReady)
+				}
+				freight, err = resolver.ResolveVerifiedRelease(ctx, projectName, appName, sourceEnv.EnvName, targetEnvName, freight)
+				if err != nil {
+					if errors.Is(err, kube.ErrReleaseNotVerified) || errors.Is(err, kube.ErrKargoNoFreight) {
+						return nil, fmt.Errorf("%w: %v", errPromoteBadRequest, err)
+					}
+					return nil, fmt.Errorf("read release evidence before preparation: %w", err)
+				}
+				if err = preparer.PrepareAppEnv(ctx, app, targetEnv); err != nil {
+					return nil, fmt.Errorf("prepare target: %w", err)
+				}
+				if err = ah.waitForTargetArgoApp(ctx, projectName, appName, targetEnvName); err != nil {
+					return nil, err
+				}
+			}
+		}
+		result, err := promoter.PromoteVerifiedRelease(ctx, projectName, appName, sourceEnv.EnvName, targetEnvName, freight)
+		if err != nil {
+			if errors.Is(err, kube.ErrReleaseNotVerified) || errors.Is(err, kube.ErrKargoNoFreight) {
+				return nil, fmt.Errorf("%w: %v", errPromoteBadRequest, err)
+			}
+			return nil, fmt.Errorf("queue verified release: %w", err)
+		}
+		return &AppPromoteResponse{Project: projectName, App: appName, Source: sourceEnv.EnvName,
+			Destination: targetEnvName, Namespace: targetEnv.Namespace, Mechanism: "kargo",
+			Message:        "Verified release promotion queued; the source environment is unchanged",
+			KargoPromotion: &KargoPromotionDTO{Name: result.Name, Stage: result.Stage, Freight: result.Freight, Phase: result.Phase}}, nil
+	}
+	if app.Spec.EnvironmentDefaults[sourceEnv.EnvName].PinnedFrom != "" {
+		return nil, fmt.Errorf("%w: source is pinned; select a previously verified release or unpin it", errPromoteBadRequest)
 	}
 
 	// Write GitOps files for the target environment before triggering the
@@ -4026,30 +4213,22 @@ func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appN
 		return nil, fmt.Errorf("failed to list app environments")
 	}
 
-	// Stable candidates only (non-preview, Order < target.Order).
-	var stableCandidates []*domain.AppEnvironment
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
+	if err != nil {
+		return nil, err
+	}
+	sources, err := domain.ReleasePipeline(app, envs)
+	if err != nil {
+		return nil, err
+	}
+	source := sources[target.EnvName]
 	for _, env := range envs {
-		if env.EnvName == target.EnvName || env.EnvType == domain.AppEnvPreview {
-			continue
-		}
-		if env.Order < target.Order {
-			stableCandidates = append(stableCandidates, env)
+		if source != "" && env.EnvName == source {
+			return env, nil
 		}
 	}
+	return nil, fmt.Errorf("%q has no upstream stage to promote from; it receives merged builds directly", target.EnvName)
 
-	if len(stableCandidates) == 0 {
-		return nil, fmt.Errorf("%q has no upstream stage to promote from — it deploys merged builds automatically (merge the PR), or pin a preview to deploy without merging", target.EnvName)
-	}
-
-	// Pick the stable env with the highest Order (closest predecessor);
-	// tie-break lexicographically for determinism.
-	sort.Slice(stableCandidates, func(i, j int) bool {
-		if stableCandidates[i].Order != stableCandidates[j].Order {
-			return stableCandidates[i].Order > stableCandidates[j].Order
-		}
-		return stableCandidates[i].EnvName < stableCandidates[j].EnvName
-	})
-	return stableCandidates[0], nil
 }
 
 // workloadClusterClient resolves the cluster an environment's workloads run on
@@ -4739,7 +4918,14 @@ func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
 	if dto == nil {
 		return domain.CDConfig{}
 	}
-	return domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote}
+	cd := domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote, Verification: dto.Verification}
+	if dto.ReleaseValidationMode != nil {
+		cd.ReleaseValidationMode = *dto.ReleaseValidationMode
+	}
+	if dto.ReleaseValidationEnvironment != nil {
+		cd.ReleaseValidationEnvironment = *dto.ReleaseValidationEnvironment
+	}
+	return cd
 }
 
 // appImageBindingsFromDTO converts wire image selections into domain selections.
@@ -4841,6 +5027,7 @@ func (ah *appHandler) validateCDImageSource(ctx context.Context, app *domain.App
 }
 
 func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO {
+	promotionSources, _ := domain.ReleasePipeline(app, envs)
 	secretRefs := make([]AppSecretRefDTO, 0, len(app.Spec.SecretRefs))
 	for _, ref := range app.Spec.SecretRefs {
 		secretRefs = append(secretRefs, AppSecretRefDTO{
@@ -4876,7 +5063,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		RawValues:           app.Spec.RawValues,
 		EnvRawValues:        envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		EnvTemplateVersions: envTemplateVersionsDTO(app.Spec.EnvironmentDefaults),
-		CD:                  CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured},
+		CD:                  CDConfigDTO{ReleaseValidationMode: &app.Spec.CD.ReleaseValidationMode, PromotionSources: promotionSources, ReleaseValidationEnvironment: &app.Spec.CD.ReleaseValidationEnvironment, Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured, Verification: app.Spec.CD.Verification},
 		Images:              appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:        string(app.Spec.DeliveryMode),
 		PreviewsEnabled:     app.Spec.PreviewsEnabled,
@@ -5596,6 +5783,15 @@ func summarizeCDPipeline(wh *KargoWarehouseDTO, stages []KargoStageStatusDTO) *K
 	// been assessed yet (ArgoCD still syncing), is progress — celebrate it,
 	// don't alarm the user.
 	for _, st := range stages {
+		if st.Phase == "Idle" {
+			continue
+		}
+		if st.Phase == "Cleaning" {
+			return &KargoCDSummaryDTO{State: "active", Message: "Validation completed — cleaning up temporary workloads."}
+		}
+		if st.Phase == "Preparing" {
+			return &KargoCDSummaryDTO{State: "deploying", Message: "Preparing temporary validation workloads for the next release."}
+		}
 		if st.Phase == "Promoting" || (st.CurrentFreight != "" && st.Health != "Healthy" && st.Health != "Unhealthy") {
 			return &KargoCDSummaryDTO{State: "deploying", Message: "Deploying your release — waiting for it to report healthy. This can take a few minutes."}
 		}

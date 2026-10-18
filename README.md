@@ -102,8 +102,11 @@ with its own URL and its own database, torn down on merge:
 
 ![Preview environments](docs/images/ui-previews.png)
 
-**Production is one click, and gated.** Merge ships staging; promotion re-tags
-the exact staging release to prod via Kargo — and rollback is one click too:
+**Production is gated.** Merge ships staging; select a verified release to
+promote via Kargo, even while staging is pinned to another release. See
+[verified release promotion](docs/verified-release-promotion.md) for prerequisites
+and rollout behavior. For new releases while staging is reserved, opt into
+[persistent release validation](docs/release-validation.md). Rollback remains a separate action:
 
 ![Promote to prod](docs/images/ui-promote.png)
 

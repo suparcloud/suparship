@@ -179,7 +179,6 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/org/routing-profiles/{name}", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgRoutingProfile)))
 	mux.HandleFunc("DELETE /api/v1/org/routing-profiles/{name}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteOrgRoutingProfile)))
 
-
 	// Project-scoped endpoints — role-based access.
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
@@ -402,6 +401,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/previews", devProject(rh.appHandler.handleCreateAppPreview))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}", devProject(rh.appHandler.handleDeleteAppPreview))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/promote", manageProject(rh.appHandler.handlePromoteApp))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/promotion-candidates", viewProject(rh.appHandler.handleVerifiedReleaseCandidates))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/undeploy", manageProject(rh.appHandler.handleUndeployAppEnv))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handlePinAppEnv))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handleUnpinAppEnv))
