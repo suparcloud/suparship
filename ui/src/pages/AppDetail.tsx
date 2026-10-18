@@ -2653,6 +2653,8 @@ function AppValuesEditor({
   const [validationMode, setValidationMode] = useState<"persistent" | "ephemeral">("persistent");
   const [separateValidation, setSeparateValidation] = useState(false);
   const [verification, setVerification] = useState<Record<string, string>>({});
+ const [validationPolicies,setValidationPolicies]=useState<Record<string,"retain"|"disposable">>({});
+ const [validationValues,setValidationValues]=useState<Record<string,string>>({});
   const [cdSaving, setCdSaving] = useState(false);
   const [previewsEnabled, setPreviewsEnabled] = useState(true);
   const [deliveryMode, setDeliveryMode] = useState("pipeline");
@@ -2720,7 +2722,8 @@ function AppValuesEditor({
   const baselineReposRef = useRef<ReadonlySet<string> | null>(null);
   const [imagesSaving, setImagesSaving] = useState(false);
 
-  const environmentConfigKey = JSON.stringify((data.environments ?? []).map(env => [env.envName, env.deploy]));
+  const componentValidationConfigKey = JSON.stringify(data.components.map(c=>[c.name,c.stateful,c.releaseValidationDataPolicy,c.envValues]));
+ const environmentConfigKey = JSON.stringify((data.environments ?? []).map(env => [env.envName, env.deploy]));
   // Health-only updates must not reset unsaved settings.
 
   useEffect(() => {
@@ -2737,6 +2740,8 @@ function AppValuesEditor({
     setValidationEnvironment(data.cd?.releaseValidationEnvironment ?? "");
     setValidationMode(!data.cd?.releaseValidationEnvironment || data.cd?.releaseValidationMode === "ephemeral" ? "ephemeral" : "persistent");
     setSeparateValidation(Boolean(data.cd?.releaseValidationEnvironment));
+    setValidationValues(Object.fromEntries(data.components.filter(c=>c.stateful).map(c=>[c.name,stringifyOverlay(c.envValues?.[data.cd?.releaseValidationEnvironment || "release-validation"])])));
+    setValidationPolicies(Object.fromEntries(data.components.filter(c=>c.stateful).map(c=>[c.name,c.releaseValidationDataPolicy==="disposable"?"disposable":"retain"])));
     setVerification(Object.fromEntries(Object.entries(data.cd?.verification ?? {}).map(([env, names]) => [env, names.join(", ")])));
     setPreviewsEnabled(data.previewsEnabled ?? true);
     setDeliveryMode(data.deliveryMode === "direct" ? "direct" : "pipeline");
@@ -2746,7 +2751,7 @@ function AppValuesEditor({
     }
     setDeployEnvs(de);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.rawValues, data.envRawValues, data.cd, data.previewsEnabled, data.deliveryMode, environmentConfigKey]);
+  }, [data.rawValues, data.envRawValues, data.cd, data.previewsEnabled, data.deliveryMode, componentValidationConfigKey, environmentConfigKey]);
 
   // Seed the per-unique-image CD rules from the app's saved bindings (or
   // inherit-from-template declared defaults when none), grouped by repository. On a
@@ -2895,6 +2900,8 @@ function AppValuesEditor({
   }
 
   const cdDirty =
+ Object.entries(validationValues).some(([name,text])=>{const parsed=parseYamlOverlay(text);const component=data.components.find(c=>c.name===name);return parsed.error!==null || !deepEqual(parsed.value??{},component?.envValues?.[validationEnvironment||"release-validation"]??{});}) ||
+ JSON.stringify(validationPolicies)!==JSON.stringify(Object.fromEntries(data.components.filter(c=>c.stateful).map(c=>[c.name,c.releaseValidationDataPolicy==="disposable"?"disposable":"retain"]))) ||
     cdManaged !== (data.cd?.managed ?? false) ||
     autoPromote !== (data.cd?.autoPromote ?? false) ||
     (separateValidation ? validationEnvironment : "") !== (data.cd?.releaseValidationEnvironment ?? "") ||
@@ -3076,10 +3083,16 @@ function AppValuesEditor({
   }
 
   async function saveCD() {
+    const componentOverrides: Record<string,Record<string,unknown>>={};
+ if(separateValidation && validationMode === "ephemeral") {
+ for(const [name,text] of Object.entries(validationValues)) {
+ const parsed=parseYamlOverlay(text);if(parsed.error){toast.error(`Invalid validation values for ${name}: ${parsed.error}`);return;}componentOverrides[name]=parsed.value??{};
+ }
+ }
     setCdSaving(true);
     const progress = toast.loading("Saving CD settings — publishing to GitOps…");
     try {
-      await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote, releaseValidationManaged: separateValidation && (data.cd?.releaseValidationManaged === true || !data.cd?.releaseValidationEnvironment), releaseValidationEnvironment: separateValidation ? validationEnvironment : "", releaseValidationMode: separateValidation ? validationMode : "persistent", verification: Object.fromEntries(Object.entries(verification).map(([env, names]) => [env, names.split(",").map(name => name.trim()).filter(Boolean)])) } });
+      await updateApp(project, data.name, { componentValidationPolicies: validationPolicies, ...(Object.keys(componentOverrides).length ? {envComponentValues:{[validationEnvironment]:componentOverrides}} : {}), cd: { managed: cdManaged, autoPromote, releaseValidationManaged: separateValidation && (data.cd?.releaseValidationManaged === true || !data.cd?.releaseValidationEnvironment), releaseValidationEnvironment: separateValidation ? validationEnvironment : "", releaseValidationMode: separateValidation ? validationMode : "persistent", verification: Object.fromEntries(Object.entries(verification).map(([env, names]) => [env, names.split(",").map(name => name.trim()).filter(Boolean)])) } });
       toast.success("CD settings saved and published to GitOps.", { id: progress });
       await onSaved();
     } catch (err) {
@@ -3591,12 +3604,19 @@ function AppValuesEditor({
                         <option value="ephemeral">{data.cd?.releaseValidationEnvironment && !data.cd?.releaseValidationManaged ? "Ephemeral — create for each release" : "Ephemeral (default) — create for each release"}</option>
                       </select>
                     </label>
-                    <p className="text-xs text-gray-500">{validationMode === "ephemeral" ? "Creates workloads for validation, then deletes them after checks pass. Failed runs remain for one hour for debugging. All chart-managed resources are disposable; keep databases and other persistent data outside this environment. Namespace and platform configuration remain. One run at a time; newer queued builds are combined into the latest release." : "Workloads stay running between releases and consume resources continuously. Use this for stable endpoints or stateful dependencies."}</p>
+                    <p className="text-xs text-gray-500">{validationMode === "ephemeral" ? "Creates workloads for validation, then deletes them after checks pass. Failed runs remain for one hour for debugging. Chart-managed resources are removed. Stateful components require explicit disposal and temporary storage; keep persistent dependencies outside this environment. Namespace and platform configuration remain. One run at a time; newer queued builds are combined into the latest release." : "Workloads stay running between releases and consume resources continuously. Use this for stable endpoints or stateful dependencies."}</p>
                     <p className="text-xs text-gray-500">Managed validation inherits base values, configuration and secrets, with its own HTTPRoute and hostname. Use release-validation overrides for isolated credentials or different behavior. Shared credentials still access the same external systems. Existing registered validation environments retain their own configuration.</p>
                     {validationEnvironment && <p className="text-xs text-gray-700">Main builds → {validationEnvironment} → downstream release environments. The base staging environment receives main builds independently when unpinned. Configure acceptance checks for {validationEnvironment} below; configure checks explicitly for this validation source.</p>}
                     <p className="text-xs text-gray-500">Disabling restores the ordered pipeline. For ephemeral validation, wait until cleanup finishes before changing lifecycle or environment. Pins and rollbacks require persistent mode; suspension pauses new runs.</p>
                   </div>
                 )}
+                {separateValidation && validationMode === "ephemeral" && data.components.some(c=>c.stateful) && (
+ <fieldset className="mt-3 space-y-2 rounded border border-gray-200 p-3">
+ <legend className="px-1 text-sm font-medium text-gray-700">Stateful validation data</legend>
+ <p className="text-xs text-gray-500">Each stateful component must be explicitly disposable. Disable persistence in its release-validation values. Suparship checks the rendered chart and rejects PVCs, volume claim templates and external storage. Staging and production keep their storage protection.</p>
+ {data.components.filter(c=>c.stateful).map(c=><div key={c.name} className="space-y-2"><label className="flex items-center gap-2 text-xs text-gray-700"><input type="checkbox" checked={validationPolicies[c.name]==="disposable"} onChange={e=>setValidationPolicies(current=>({...current,[c.name]:e.target.checked?"disposable":"retain"}))} />Dispose of {c.name} data only in ephemeral release validation</label>{validationPolicies[c.name]==="disposable" && <label className="block text-xs text-gray-600">{c.name} validation values<textarea className="mt-1 block w-full rounded border border-gray-300 p-2 font-mono text-xs" rows={4} value={validationValues[c.name]??""} placeholder={"persistence:\n  enabled: false"} onChange={e=>setValidationValues(current=>({...current,[c.name]:e.target.value}))} /><span className="mt-1 block text-gray-500">Only validation is affected. Use the persistence settings supported by this component’s chart; other environments keep their existing values.</span></label>}</div>)}
+ </fieldset>
+ )}
                 <p className="mt-3 text-sm font-medium text-gray-700">Acceptance checks</p>
                 <p className="mt-1 text-xs text-gray-500">Enter existing AnalysisTemplate names, separated by commas. Templates must exist in the project's Kargo namespace. Empty means rollout health checks only.</p>
                 {Array.from(new Set([...envs, ...(separateValidation && validationEnvironment ? [validationEnvironment] : [])])).filter(env => env !== PREVIEW_SCOPE).map(env => (

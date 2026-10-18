@@ -646,6 +646,7 @@ export interface ComponentSummary {
   images?: ComponentImage[];
   /** Stateful (a database/cache): its own prune-disabled Application. */
   stateful?: boolean;
+ releaseValidationDataPolicy?: "retain" | "disposable" | "";
 }
 
 // ComponentEnvOverride is one environment's override of a component's
@@ -1015,6 +1016,7 @@ export interface ComponentCreate {
   images?: ComponentImage[];
   /** Stateful (a database/cache): renders as its own prune-disabled Application. */
   stateful?: boolean;
+ releaseValidationDataPolicy?: "retain" | "disposable" | "";
   /** Override preview inclusion. Omit for the type default (web/worker on;
    *  stateful + job/cron off). */
   previewEnabled?: boolean;

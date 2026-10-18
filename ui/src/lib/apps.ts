@@ -134,6 +134,7 @@ export interface UpdateAppRequest {
   // panel can manage a composed app's per-component images. Omit to leave
   // unchanged; a component mapped to [] clears it.
   componentImages?: Record<string, ComponentImage[]>;
+ componentValidationPolicies?: Record<string, "retain" | "disposable">;
   // deliveryMode switches the app's delivery mode ("pipeline" or "direct").
   // Omit to leave unchanged.
   deliveryMode?: string;
