@@ -234,3 +234,48 @@ Raw Kargo Stage health reports the deleted validator Application as unhealthy af
 cleanup; Suparship exposes the durable Idle lifecycle separately. Direct Kargo
 monitoring must account for that lifecycle. Failed runs occupy the single validation
 slot during their one-hour retention, so newer builds wait until cleanup.
+
+## Managed validation rehearsal — 2026-10-18 (UTC)
+
+The local Tilt stack (`kind-suparship-dev`) validated the app-owned setup without
+adding an organization environment or cluster registration. Fixture app
+`demo-managed-check` inherited staging's existing cluster and used namespace
+`demo-managed-check-release-validation`, without a repeated `demo-` prefix.
+
+A local Envoy Gateway v1.3.0 installation supplied Gateway API CRDs and a test
+Gateway. The app's web chart inherited an enabled HTTPRoute whose hostname used
+`((platform.routingHost))`. The generated validation route was accepted with
+resolved references at `demo-managed-check-release-validation.localhost` and
+returned HTTP 200 through a local Gateway service port-forward.
+
+For candidate `managed-check-1792347540`, Freight
+`e32cd74756d469d11da714144a98cdff6beda174`, the rehearsal confirmed:
+
+- API setup automatically created the app-owned validation instance, with no
+  environment selector or duplicate cluster registration.
+- Base Helm annotations and validation overrides both reached the Deployment.
+- The namespace-local ConfigMap inherited base variables and applied validation
+  overrides. Its Secret inherited base backend items and applied the independent
+  validation override item. No secret values were written to the evidence summary.
+- Kargo recorded verification in the validation Stage, without staging verification
+  for that candidate. This used rollout health verification, not a new custom
+  acceptance AnalysisRun; the harness separately checked the HTTP endpoint.
+- Cleanup returned to zero validation pods and HTTPRoutes, retaining the namespace,
+  ConfigMap, ExternalSecret and verification history.
+- Production automatically promoted the verified image and reached two ready pods.
+  Staging remained pinned to `validation-hold` / `main-7924225`.
+- Disabling validation removed the managed instance from the app and restored the
+  ordered pipeline. Re-enabling reused the dedicated namespace and base cluster.
+
+The harness waited for the reservation's disabled scheduling policy and pinned
+Deployment to become live before publishing the candidate. A fixture-wide nonempty
+baseline secret was provisioned through the secrets API so production's ExternalSecret
+could materialize; persistent production dependencies remain independently configured.
+
+Saved local evidence: `tmp/release-demo/evidence/managed-validation.json` and
+`tmp/release-demo/screenshots/15-managed-validation-settings.png` (ignored artifacts).
+Backend package tests, UI production build and golangci-lint passed. Additional
+regressions cover missing-Stage recovery after interrupted setup, override precedence,
+namespace ownership, safe disable/rollback, and retained-platform cleanup on app deletion.
+This rehearsal does not establish live multi-cluster or arbitrary external-chart
+compatibility; charts must support namespace isolation and platform-derived route hosts.
