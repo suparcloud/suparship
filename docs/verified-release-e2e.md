@@ -279,3 +279,22 @@ regressions cover missing-Stage recovery after interrupted setup, override prece
 namespace ownership, safe disable/rollback, and retained-platform cleanup on app deletion.
 This rehearsal does not establish live multi-cluster or arbitrary external-chart
 compatibility; charts must support namespace isolation and platform-derived route hosts.
+
+## Validation-only disposable Redis (2026-10-19)
+
+Rehearsed against the local Tilt stack in `kind-suparship-dev` using `demo-cache`.
+The stateful Redis component kept a PVC in staging and production. Ephemeral
+validation alone used an explicit disposable policy and an `emptyDir` override.
+
+- Default retention rejected ephemeral setup without explicit consent.
+- Marking the component disposable while inheriting its PVC mount failed rendered
+  chart preflight before validation workloads were activated.
+- Two validation runs each started with empty Redis data, without a PVC.
+- Each run removed validation pods, HTTPRoutes and stateful child Applications.
+- Reserved staging retained its original PVC UID and Redis sentinel value.
+- The second verified image automatically reached a healthy production deployment.
+
+The harness was resumed after accommodating Kargo's temporary auto-sync changes;
+unit tests separately assert pruning stays disabled in stable and persistent
+validation environments. Evidence: `tmp/release-demo/evidence/disposable-redis.json`
+(ignored local artifact). Go package tests, golangci-lint and the UI build passed.
