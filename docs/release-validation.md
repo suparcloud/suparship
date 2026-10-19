@@ -233,3 +233,61 @@ not a general disposable flag. Persistent validation and stable environments kee
 stateful Application pruning disabled. Each ephemeral run receives fresh temporary
 data; successful checks remove its workloads and failed runs retain them for one
 hour. The policy does not clean external database contents or shared credentials.
+
+## Operator: end failed-run retention early
+
+After correcting a provisioning or verification failure, an operator can skip the
+remaining one-hour debugging window. This removes retained validation workloads;
+collect any needed logs first. It does not unpin staging, approve Freight, or bypass
+verification or production promotion policy. There is currently no UI retry button.
+
+Use the tooling cluster that hosts Kargo. The following example targets
+`voiceai/voiceai-lk-sh`; replace the context, namespace, and Stage for your app.
+It changes only `failed` to `cleaning`, preserving the Freight cursor and other
+run fields. It refuses to act while the controller holds a lifecycle lease and
+uses a resource-version test to reject concurrent changes. If either guard fails,
+inspect the current state and retry later; do not remove the lease or force the patch.
+
+```bash
+python3 - <<'PY'
+import json
+import subprocess
+
+context = "shared-aks-01-southcentralus"
+namespace = "kargo-voiceai"
+stage = "voiceai-lk-sh-release-validation"
+base = ["kubectl", "--context", context, "--request-timeout=15s", "-n", namespace]
+obj = json.loads(subprocess.check_output(base + ["get", "stage", stage, "-o", "json"]))
+annotations = obj["metadata"]["annotations"]
+run = json.loads(annotations["suparship.io/validation-run"])
+if run.get("phase") != "failed":
+    raise SystemExit("Run is not failed; inspect its current phase instead.")
+if annotations.get("suparship.io/validation-lease"):
+    raise SystemExit("Controller lease present; retry after it is released.")
+run["phase"] = "cleaning"
+patch = [
+    {"op": "test", "path": "/metadata/resourceVersion",
+     "value": obj["metadata"]["resourceVersion"]},
+    {"op": "replace", "path": "/metadata/annotations/suparship.io~1validation-run",
+     "value": json.dumps(run, separators=(",", ":"))},
+]
+subprocess.run(base + ["patch", "stage", stage, "--type=json", "-p", json.dumps(patch)], check=True)
+PY
+```
+
+Inspect progress:
+
+```bash
+kubectl --context shared-aks-01-southcentralus -n kargo-voiceai \
+  get stage voiceai-lk-sh-release-validation -o json \
+  | jq '.metadata.annotations["suparship.io/validation-run"] | fromjson'
+```
+
+Expected phases are `cleaning → deleting → idle → provisioning → waiting → running`.
+The controller selects the newest queued Freight **after the saved cursor**, not
+necessarily the failed build. Without newer Freight it remains idle; this procedure
+is not a same-build retry. Do not reset the cursor manually. Successful verification
+allows normal downstream promotion and triggers validation cleanup. Confirm the
+actual production image and successful Kargo Promotion before declaring delivery
+complete. If provisioning fails again, inspect its error and effective validation
+values rather than repeatedly clearing the retention window.
