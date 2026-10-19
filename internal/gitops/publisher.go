@@ -657,6 +657,9 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 // clone and commit once.
 func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	for _, env := range envs {
+		if env.SkipWorkloads {
+			continue
+		}
 		if env.BaseEnv != "" && !app.Spec.CD.ManagedValidation() {
 			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
 				return err
@@ -812,6 +815,9 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 // call unconditionally — a no-op for an app that was never single.
 func (p *Publisher) pruneSingleSourceArtifacts(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	for _, env := range envs {
+		if env.SkipWorkloads {
+			continue
+		}
 		dir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
 		for _, f := range []string{"values.yaml", "app.yaml"} {
 			if err := os.Remove(filepath.Join(dir, f)); err != nil && !os.IsNotExist(err) {
@@ -835,6 +841,9 @@ func (p *Publisher) pruneSingleSourceArtifacts(repoDir string, app *domain.App, 
 // no-op for an app that was never composed.
 func (p *Publisher) pruneComposedArtifacts(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	for _, env := range envs {
+		if env.SkipWorkloads {
+			continue
+		}
 		if err := os.RemoveAll(p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components")); err != nil {
 			return fmt.Errorf("prune composed components (env %s): %w", env.EnvName, err)
 		}
@@ -1005,6 +1014,9 @@ func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string,
 
 	touchedEnvs := make(map[string]bool)
 	for _, env := range envs {
+		if env.SkipWorkloads {
+			continue
+		}
 		if !env.Bound {
 			slog.Warn("gitops: skipping composed publish for unbound env — assign a cluster via Settings > Environments",
 				"app", app.Name, "env", env.EnvName)
@@ -1486,7 +1498,8 @@ func (p *Publisher) PublishApps(ctx context.Context, bundles []AppPublishBundle)
 				}
 				infraDone[b.App.ProjectName] = true
 			}
-			if err := p.writeAppTree(ctx, repoDir, b.App, b.Envs); err != nil {
+			envs := focusedWorkloadEnvs(b.Envs, b.FocusEnvs)
+			if err := p.writeAppTree(ctx, repoDir, b.App, envs); err != nil {
 				return err
 			}
 			for i := range b.FocusEnvs {
@@ -1517,6 +1530,9 @@ func (p *Publisher) publishAppFiles(ctx context.Context, repoDir string, app *do
 	chartMode, chartRef := p.resolveTemplateChartMode(app.Spec.Template.Name)
 
 	for _, env := range envs {
+		if env.SkipWorkloads {
+			continue
+		}
 		if !env.Bound {
 			slog.Warn("gitops: skipping publish for unbound env — assign a cluster via Settings > Environments",
 				"app", app.Name, "env", env.EnvName)
@@ -2720,6 +2736,10 @@ type ComponentPlatformValues struct {
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
 type AppPublishEnv struct {
+	// SkipWorkloads retains this environment in pipeline generation without
+	// rendering or changing its workloads during a targeted pin/unpin/rollback.
+	SkipWorkloads bool
+
 	BaseEnv        string
 	ValidationKeys []string
 	PrepareOnly    bool
@@ -4371,4 +4391,22 @@ func (p *Publisher) git(ctx context.Context, dir string, args ...string) error {
 		return fmt.Errorf("git %s: %w\n%s", args[0], err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// Keep the entire environment chain for Kargo while restricting workload writes.
+func focusedWorkloadEnvs(envs, focus []AppPublishEnv) []AppPublishEnv {
+	if len(focus) == 0 {
+		return envs
+	}
+	out := append([]AppPublishEnv(nil), envs...)
+	for i := range out {
+		out[i].SkipWorkloads = true
+		for _, target := range focus {
+			if target.EnvName == out[i].EnvName {
+				out[i].SkipWorkloads = false
+				break
+			}
+		}
+	}
+	return out
 }

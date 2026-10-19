@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Limit batched pin, unpin, and rollback workload publication to the target
+  environment, keeping unrelated validation storage checks from blocking stable
+  releases while preserving the complete Kargo pipeline configuration.
+
 - Scope preview runtime discovery to its Argo CD Applications so previews sharing
   Helm labels cannot mix images, replicas, health, or endpoints. Skip components
   excluded from previews when aggregating their runtime status.
