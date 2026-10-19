@@ -3383,6 +3383,15 @@ func (ah *appHandler) unpinAppEnvSpec(ctx context.Context, projectName, appName,
 	}
 	ov := app.Spec.EnvironmentDefaults[envName]
 	if ov.PinnedFrom == "" {
+		// A failed publication leaves the one-shot restore tag persisted.
+		// Retry that publication instead of treating the unpin as complete.
+		if ov.PinnedImageTag != "" {
+			targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName)
+			if err != nil {
+				return nil, nil, "", true, err
+			}
+			return app, targetEnv, ov.PinnedImageTag, true, nil
+		}
 		return app, nil, "", false, nil
 	}
 
