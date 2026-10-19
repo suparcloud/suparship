@@ -269,7 +269,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 			},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: withPreparedApplications(generators, syncPolicy),
+			Generators: withPreparedApplications(generators, syncPolicy, repoURL, opts.TargetRevision),
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
 					// Single-cluster name MUST mirror gitops.ApplicationName —
@@ -402,7 +402,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 			},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: withPreparedApplications(generators, syncPolicy),
+			Generators: withPreparedApplications(generators, syncPolicy, repoURL, opts.TargetRevision),
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
 					Name:      appName,
@@ -545,10 +545,12 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 // Each ApplicationSet's generator filters on chartType so an app's
 // app.yaml is consumed by exactly one AppSet.
 type AppMetadata struct {
-	PromotionPending string `yaml:"promotionPending,omitempty"`
-	Name             string `yaml:"name"`
-	Project          string `yaml:"project"`
-	Template         string `yaml:"template"`
+	PromotionPending    string `yaml:"promotionPending,omitempty"`
+	ValidationIdle      string `yaml:"validationIdle,omitempty"`
+	ValidationEmptyPath string `yaml:"validationEmptyPath,omitempty"`
+	Name                string `yaml:"name"`
+	Project             string `yaml:"project"`
+	Template            string `yaml:"template"`
 	// ChartPath is the gitops chart directory for this app relative to charts/,
 	// i.e. "{template}/{versionDir}". The inline ApplicationSet substitutes it
 	// into the chart source path ({{chartPath}}) so apps pinning different
@@ -793,7 +795,7 @@ func BuildPreviewPlatformAppSet(repoURL string, opts AppSetOptions) *Application
 
 // Prepared applications exist for Kargo's explicit sync but cannot auto-deploy
 // the placeholder values. Promotion clears the flag in the same commit as tags.
-func withPreparedApplications(gens []ApplicationSetGenerator, policy *SyncPolicy) []ApplicationSetGenerator {
+func withPreparedApplications(gens []ApplicationSetGenerator, policy *SyncPolicy, repoURL, revision string) []ApplicationSetGenerator {
 	if len(gens) != 1 || gens[0].Git == nil {
 		return gens
 	}
@@ -809,5 +811,27 @@ func withPreparedApplications(gens []ApplicationSetGenerator, policy *SyncPolicy
 		active.Git.Template = map[string]any{"metadata": map[string]any{}, "spec": map[string]any{"project": "", "destination": map[string]any{}, "syncPolicy": map[string]any{"automated": policy.Automated}}}
 		policy.Automated = nil
 	}
-	return []ApplicationSetGenerator{active, pending}
+	for _, gen := range []*ApplicationSetGenerator{&active, &pending} {
+		copied := *gen.Git
+		gen.Git = &copied
+		if gen.Git.Template == nil {
+			gen.Git.Template = map[string]any{"spec": map[string]any{"project": "", "destination": map[string]any{}}}
+		}
+		gen.Git.Template["metadata"] = map[string]any{"annotations": map[string]string{validationIdleAnnotation: "false"}}
+
+		expressions, _ := gen.Selector["matchExpressions"].([]map[string]any)
+		gen.Selector["matchExpressions"] = append(expressions, map[string]any{"key": "validationIdle", "operator": "NotIn", "values": []string{"true"}})
+	}
+	idle := gens[0]
+	idleGit := *idle.Git
+	idle.Git = &idleGit
+	idle.Selector = map[string]any{"matchLabels": map[string]string{"validationIdle": "true"}}
+	idle.Git.Template = map[string]any{
+		"metadata": map[string]any{"annotations": map[string]string{validationIdleAnnotation: "true"}},
+		"spec": map[string]any{"project": "", "destination": map[string]any{},
+			"sources":    []ApplicationSource{{RepoURL: repoURL, TargetRevision: revision, Path: "{{validationEmptyPath}}"}},
+			"syncPolicy": map[string]any{"automated": &AutomatedSyncPolicy{Prune: true, SelfHeal: true, AllowEmpty: true}},
+		},
+	}
+	return []ApplicationSetGenerator{active, pending, idle}
 }

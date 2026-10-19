@@ -9,6 +9,8 @@ import (
 
 	"github.com/suparcloud/suparship/internal/domain"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 func TestValidationLeaseSerializesAndRestoresProgress(t *testing.T) {
@@ -83,5 +85,57 @@ func TestValidationLeaseReportsMissingStageBeforeRunningAction(t *testing.T) {
 	err := store.WithValidationLease(context.Background(), "voiceai", "missing", "release-validation", func(context.Context, *domain.ValidationRun) error { called = true; return nil })
 	if !errors.Is(err, ErrValidationStageMissing) || called {
 		t.Fatalf("unsafe missing-stage recovery: called=%t err=%v", called, err)
+	}
+}
+
+func TestValidationApplicationShellReadiness(t *testing.T) {
+	ctx := context.Background()
+	source := map[string]any{"repoURL": "http://gitops", "path": ".suparship/validation-empty", "targetRevision": "main"}
+	app := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+		"metadata": map[string]any{"name": "validator", "namespace": "argocd", "annotations": map[string]any{"suparship.io/validation-idle": "true"}},
+		"spec":     map[string]any{"source": source, "syncPolicy": map[string]any{"automated": map[string]any{"prune": true, "allowEmpty": true}}},
+		"status":   map[string]any{"sync": map[string]any{"status": "Synced", "comparedTo": map[string]any{"source": source}}, "health": map[string]any{"status": "Healthy"}},
+	}}
+	for _, tc := range []struct {
+		name            string
+		mutate          func(*unstructured.Unstructured)
+		prepared, clean bool
+	}{
+		{"empty shell", func(*unstructured.Unstructured) {}, false, true},
+		{"prune pending", func(a *unstructured.Unstructured) {
+			_ = unstructured.SetNestedSlice(a.Object, []any{map[string]any{"kind": "Deployment"}}, "status", "resources")
+		}, false, false},
+		{"stale status", func(a *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(a.Object, "old-path", "status", "sync", "comparedTo", "source", "path")
+		}, false, false},
+		{"sync running", func(a *unstructured.Unstructured) {
+			_ = unstructured.SetNestedMap(a.Object, map[string]any{"sync": map[string]any{}}, "operation")
+		}, false, false},
+		{"prepared", func(a *unstructured.Unstructured) {
+			a.SetAnnotations(map[string]string{"suparship.io/validation-idle": "false"})
+			unstructured.RemoveNestedField(a.Object, "spec", "syncPolicy", "automated")
+		}, true, false},
+		{"old active", func(a *unstructured.Unstructured) { a.SetAnnotations(nil) }, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := app.DeepCopy()
+			tc.mutate(candidate)
+			store, dyn := newKargoStore(t)
+			_, err := dyn.Resource(schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}).Namespace("argocd").Create(ctx, candidate, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, present := range []bool{true, false} {
+				want := tc.clean
+				if present {
+					want = tc.prepared
+				}
+				got, err := store.ValidationApplicationsReady(ctx, []string{"validator"}, present)
+				if err != nil || got != want {
+					t.Fatalf("present=%t: got %t, want %t: %v", present, got, want, err)
+				}
+			}
+		})
 	}
 }

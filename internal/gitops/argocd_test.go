@@ -645,7 +645,7 @@ func TestBuildArgoExternalAppSet_GeneratorPathSeparate(t *testing.T) {
 
 	// A single plain git-files generator (no matrix/list) globbing the
 	// per-(app,cluster) app.yaml files under _targets/.
-	if len(appSet.Spec.Generators) != 2 {
+	if len(appSet.Spec.Generators) != 3 {
 		t.Fatalf("expected active and prepared generators, got %+v", appSet.Spec.Generators)
 	}
 	gitGen := appSet.Spec.Generators[0].Git

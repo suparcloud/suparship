@@ -179,8 +179,10 @@ The lifecycle is:
   configure bounded timeouts for custom checks. Preparation that cannot reach
   activation within 30 minutes becomes a failed run and receives the same debug
   retention. Cleanup failures retry.
-- Cleanup removes the workload Applications through GitOps and Argo CD cascading
-  deletion. It retains namespace, platform configuration/secret resources, values
+- Cleanup points the workload Applications at an empty Git directory. Argo CD
+  prunes their disposable resources with `allowEmpty: true`; the lightweight
+  Application objects remain for Kargo health checks. It retains namespace,
+  platform configuration/secret resources, values
   in Git, Kargo Stage, and release/verification history. This is ephemeral workload
   capacity, not a fresh namespace per build or a full environment reset.
 - The validator must have a distinct namespace from the app’s other environments.
@@ -205,19 +207,23 @@ The lifecycle is:
   separate validation also requires `releaseValidationMode: "persistent"` and
   returns to the configured ordered route.
 
-ApplicationSet and Argo CD reconciliation still take time. Deletion must finish
+ApplicationSet and Argo CD reconciliation still take time. Workload pruning must finish
 before the next run provisions, so ephemeral mode trades release latency for lower
 idle compute usage. It does not eliminate control-plane or external-service costs.
 
 ### Monitoring idle capacity
 
-Suparship reports the intentionally absent validator as **Idle** and does not show
-it as a deployment in progress. Raw Kargo Stage health can report an unhealthy or
-missing Application after cleanup because it retains the last promotion's health
-check references. Alerts that read Kargo directly should account for the durable
-`suparship.io/validation-run` lifecycle annotation; idle capacity is not a failed
-release. Verification evidence remains in Freight status and is not fabricated or
-cleared to conceal the missing workload.
+Suparship reports the validator as **Idle** after Argo CD has reconciled the empty
+source, finished syncing, and reports no remaining managed resources. Kargo can
+continue checking the retained Applications instead of reporting missing objects.
+No application compute is retained; namespace, platform resources and Application
+metadata remain. Verification evidence stays in Freight status.
+
+On upgrade, previously idle runs pass through cleanup once to restore missing
+Application shells from saved manifests. The release cursor is preserved, so this
+does not revalidate or repromote an old build. The next run restores prepared,
+non-auto-syncing Applications before Kargo activates its selected Freight. Cleanup
+never changes stable environment Applications or their storage policy.
 
 ### Temporary Redis during validation
 

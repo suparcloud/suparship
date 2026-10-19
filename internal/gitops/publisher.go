@@ -1546,7 +1546,7 @@ func (p *Publisher) publishAppFiles(ctx context.Context, repoDir string, app *do
 		if err != nil {
 			return err
 		}
-		if dormant && !hasDisposableValidation(app, env.EnvName) {
+		if dormant && !hasDisposableValidation(app, env.EnvName) && !env.PrepareOnly {
 			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
 				return err
 			}

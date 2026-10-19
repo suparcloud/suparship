@@ -47,7 +47,7 @@ func TestPreparedApplicationSetHasNoInheritedAutoSync(t *testing.T) {
 		if as.Spec.Template.Spec.SyncPolicy.Automated != nil {
 			t.Fatal("pending applications inherit automatic sync")
 		}
-		if len(as.Spec.Generators) != 2 {
+		if len(as.Spec.Generators) != 3 {
 			t.Fatal("missing disjoint generators")
 		}
 		raw, err := yaml.Marshal(as)

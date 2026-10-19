@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"time"
 
@@ -262,7 +263,40 @@ func (s *KargoStore) ValidationApplicationsReady(ctx context.Context, names []st
 		if err != nil {
 			return false, err
 		}
-		if !present || obj.GetDeletionTimestamp() != nil {
+		if obj.GetDeletionTimestamp() != nil {
+			return false, nil
+		}
+		idle := obj.GetAnnotations()["suparship.io/validation-idle"] == "true"
+		if present {
+			// Do not promote against the healthy empty shell from the preceding run.
+			if idle {
+				return false, nil
+			}
+			automated, _, _ := unstructured.NestedMap(obj.Object, "spec", "syncPolicy", "automated")
+			if automated != nil {
+				return false, nil
+			}
+			continue
+		}
+		if !idle {
+			return false, nil
+		}
+		sync, _, _ := unstructured.NestedString(obj.Object, "status", "sync", "status")
+		health, _, _ := unstructured.NestedString(obj.Object, "status", "health", "status")
+		resources, _, _ := unstructured.NestedSlice(obj.Object, "status", "resources")
+		operation, _, _ := unstructured.NestedMap(obj.Object, "operation")
+		if sync != "Synced" || health != "Healthy" || len(resources) != 0 || operation != nil {
+			return false, nil
+		}
+		// Status can still describe the old workload source immediately after spec
+		// changes. Require Argo to have reconciled the empty source itself.
+		field := "source"
+		if sources, _, _ := unstructured.NestedSlice(obj.Object, "spec", "sources"); len(sources) > 0 {
+			field = "sources"
+		}
+		desired, _, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", field)
+		observed, _, _ := unstructured.NestedFieldNoCopy(obj.Object, "status", "sync", "comparedTo", field)
+		if desired == nil || !reflect.DeepEqual(desired, observed) {
 			return false, nil
 		}
 	}

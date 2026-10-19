@@ -15,7 +15,7 @@ import (
 // _targets/, so the AppSet itself no longer carries a cluster matrix/list.
 func assertSingleGitFilesGenerator(t *testing.T, as *gitops.ApplicationSet) *gitops.GitFileGenerator {
 	t.Helper()
-	if len(as.Spec.Generators) != 2 {
+	if len(as.Spec.Generators) != 3 {
 		t.Fatalf("expected active and prepared generators, got %d: %+v", len(as.Spec.Generators), as.Spec.Generators)
 	}
 	g := as.Spec.Generators[0]

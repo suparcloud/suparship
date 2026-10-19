@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"context"
+	"gopkg.in/yaml.v3"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,9 +106,17 @@ func TestDisposableIdlePreflightNeverCreatesWorkloadInputs(t *testing.T) {
 	if err := p.publishComposedAppFiles(context.Background(), root, app, []AppPublishEnv{env}); err != nil {
 		t.Fatal(err)
 	}
-	for _, base := range []string{"envs", composedAppsDir} {
-		if _, err := os.Stat(filepath.Join(root, base, "validation", "demo", "app", "_targets")); !os.IsNotExist(err) {
-			t.Fatalf("idle preflight published %s workloads: %v", base, err)
+	for _, name := range []string{"application.yaml", "redis-application.yaml"} {
+		data, err := os.ReadFile(p.outputDir(root, composedAppsDir, "validation", "demo", "app", "_targets", fallbackClusterName, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var shell Application
+		if err := yaml.Unmarshal(data, &shell); err != nil {
+			t.Fatal(err)
+		}
+		if len(shell.Spec.Sources) != 0 || shell.Spec.Source.Path != ".suparship/validation-empty" || !shell.Spec.SyncPolicy.Automated.AllowEmpty {
+			t.Fatal("idle shell could deploy workloads")
 		}
 	}
 }

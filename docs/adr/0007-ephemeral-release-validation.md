@@ -15,13 +15,15 @@ or endpoints; others can recreate disposable workloads on demand.
 Keep persistent mode as the default. Add an explicit per-app ephemeral lifecycle.
 Use the same configured validation environment, values, and promotion source.
 Prepare inactive Applications before Kargo activates the selected Freight. After
-successful verification remove workload Application inputs from Git; Argo CD
-cascades their deletion. Retain failed runs for one hour from observed failure.
+successful verification point workload Applications at an empty Git source; Argo CD
+prunes disposable resources while retaining Application identities for Kargo 1.9
+continuous health checks. Retain failed runs for one hour from observed failure.
 Never clean up while a promotion or verification is executing.
 
 Keep namespace, platform configuration, Git values, Stage, and verification history.
 Persistent data belongs outside the disposable workload Applications. Reject apps
-with declared stateful components. This is not a fresh namespace per release.
+with stateful components unless explicitly disposable in validation and rendered
+without persistent storage. This is not a fresh namespace per release.
 
 Suparship owns validation scheduling in this mode after acknowledged Kargo handoff.
 Use a Kubernetes CAS lease and durable Stage progress for restart/multi-worker

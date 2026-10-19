@@ -119,6 +119,10 @@ func activeApplicationPath(subPath, project, app, env, name string) string {
 	return joinSubPath(subPath, ".suparship", "releases", project, app, env, name)
 }
 func (p *Publisher) saveActiveApplication(repo string, app *domain.App, env AppPublishEnv, name string, manifest *Application) error {
+	if manifest.Metadata.Annotations == nil {
+		manifest.Metadata.Annotations = map[string]string{}
+	}
+	manifest.Metadata.Annotations[validationIdleAnnotation] = "false"
 	data, err := yaml.Marshal(manifest)
 	if err != nil {
 		return err

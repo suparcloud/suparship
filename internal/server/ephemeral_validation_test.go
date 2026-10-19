@@ -159,3 +159,18 @@ func TestDeletingValidationRepairsDormantStateBeforeWaiting(t *testing.T) {
 		t.Fatal("finished before Applications disappeared")
 	}
 }
+
+func TestIdleValidationMigratesWithoutRevalidatingFreight(t *testing.T) {
+	cursor := time.Now()
+	run := domain.ValidationRun{Phase: "idle", Cursor: cursor}
+	actions := validationRunActions{next: func() (string, time.Time, error) {
+		t.Fatal("migration discovered a new release")
+		return "", time.Time{}, nil
+	}}
+	if err := advanceValidationRun(context.Background(), &run, domain.ValidationObservation{}, cursor, actions); err != nil {
+		t.Fatal(err)
+	}
+	if run.Phase != "cleaning" || !run.Cursor.Equal(cursor) {
+		t.Fatalf("migration lost release history: %+v", run)
+	}
+}

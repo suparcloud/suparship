@@ -132,6 +132,12 @@ func advanceValidationRun(ctx context.Context, run *domain.ValidationRun, obs do
 			run.Phase = "cleaning"
 		}
 	case "idle":
+		// Migrate previously deleted validation Applications once, preserving the
+		// release cursor. Never re-run a verified release merely to repair health.
+		if run.CleanupVersion < 1 {
+			run.Phase = "cleaning"
+			return nil
+		}
 		if a.paused {
 			return nil
 		}
@@ -194,6 +200,7 @@ func advanceValidationRun(ctx context.Context, run *domain.ValidationRun, obs do
 		if !gone {
 			return nil
 		}
+		run.CleanupVersion = 1
 		run.Phase = "idle"
 		run.Freight = ""
 		run.StartedAt = time.Time{}

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Retain empty Argo CD Applications after ephemeral validation cleanup so Kargo
+  health checks remain valid. Wait for workload pruning before reusing capacity,
+  and migrate previously idle validators without replaying verified releases.
+
 - Limit batched pin, unpin, and rollback workload publication to the target
   environment, keeping unrelated validation storage checks from blocking stable
   releases while preserving the complete Kargo pipeline configuration.
