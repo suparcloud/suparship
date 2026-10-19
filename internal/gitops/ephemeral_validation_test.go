@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"context"
+	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,5 +71,58 @@ func TestEphemeralDormancySurvivesRepublish(t *testing.T) {
 	app.Spec.CD.ReleaseValidationMode = "persistent"
 	if dormant, err := p.validationDormant(root, app, env); err != nil || dormant {
 		t.Fatal("persistent mode depended on ephemeral marker")
+	}
+}
+
+func TestValidationCleanupPreservesEmptyComposedRoot(t *testing.T) {
+	for _, sub := range []string{"", "gitops"} {
+		t.Run(sub, func(t *testing.T) {
+			root := t.TempDir()
+			p, err := NewPublisher(PublisherConfig{RepoURL: "http://localhost/gitops.git", SubPath: sub})
+			if err != nil {
+				t.Fatal(err)
+			}
+			app := &domain.App{Name: "web", ProjectName: "demo"}
+			env := AppPublishEnv{EnvName: "validation"}
+			parent := BuildComposedRootApp(env.EnvName, "http://localhost/gitops.git", AppSetOptions{SyncAutomated: true, SubPath: sub})
+			data, err := yaml.Marshal(parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parentPath := p.outputDir(root, "_infra", "validation-composed-appset.yaml")
+			if err := p.writeFile(parentPath, data); err != nil {
+				t.Fatal(err)
+			}
+			child := p.outputDir(root, composedAppsDir, "validation", "demo", "web", "_targets", "local", "app.yaml")
+			if err := p.writeFile(child, []byte("test")); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				if err := p.removeValidationWorkloads(root, app, env); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := os.Stat(child); !os.IsNotExist(err) {
+				t.Fatal("workload input retained")
+			}
+			if _, err := os.Stat(p.outputDir(root, composedAppsDir, "validation", ".gitkeep")); err != nil {
+				t.Fatal(err)
+			}
+			data, err = os.ReadFile(parentPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got Application
+			if err := yaml.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.Spec.SyncPolicy.Automated.AllowEmpty || got.Spec.Source.Path != parent.Spec.Source.Path {
+				t.Fatal("cleanup root cannot reconcile empty state")
+			}
+			stable := BuildComposedRootApp("production", "http://localhost/gitops.git", AppSetOptions{SyncAutomated: true})
+			if stable.Spec.SyncPolicy.Automated.AllowEmpty {
+				t.Fatal("stable environment empty protection changed")
+			}
+		})
 	}
 }

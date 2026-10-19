@@ -133,3 +133,29 @@ func TestValidationPreparationTimeoutRetainsThenCleans(t *testing.T) {
 		t.Fatal("timed out preparation never cleaned up")
 	}
 }
+
+func TestDeletingValidationRepairsDormantStateBeforeWaiting(t *testing.T) {
+	run := domain.ValidationRun{Phase: "deleting"}
+	repaired := false
+	actions := validationRunActions{
+		workloads: func(active bool) error {
+			if active {
+				t.Fatal("cleanup activated workloads")
+			}
+			repaired = true
+			return nil
+		},
+		ready: func(present bool) (bool, error) {
+			if !repaired || present {
+				t.Fatal("checked deletion before repairing dormant state")
+			}
+			return false, nil
+		},
+	}
+	if err := advanceValidationRun(context.Background(), &run, domain.ValidationObservation{}, time.Now(), actions); err != nil {
+		t.Fatal(err)
+	}
+	if run.Phase != "deleting" {
+		t.Fatal("finished before Applications disappeared")
+	}
+}

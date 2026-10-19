@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Repair stuck ephemeral validation cleanup by keeping its composed manifest
+  directory tracked and enabling empty-state pruning on its parent Application.
+  Cleanup retries repair older dormant configurations before waiting for deletion.
+
 - Apply the configured Kubernetes read budget to remote workload clients, avoiding
   default client throttling that prevents composed app status from refreshing.
 - Show unknown runtime status after an incomplete initial app read, instead of

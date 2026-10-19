@@ -183,6 +183,10 @@ func advanceValidationRun(ctx context.Context, run *domain.ValidationRun, obs do
 		}
 		run.Phase = "deleting"
 	case "deleting":
+		// Reassert dormant Git state so interrupted or older cleanup can recover.
+		if err := a.workloads(false); err != nil {
+			return err
+		}
 		gone, err := a.ready(false)
 		if err != nil {
 			return err

@@ -84,5 +84,34 @@ func (p *Publisher) removeValidationWorkloads(repo string, app *domain.App, env 
 			return err
 		}
 	}
-	return nil
+	return p.ensureValidationCleanupRoot(repo, env.EnvName)
+}
+
+// An idle validation environment is intentionally empty. Keep its directory
+// tracked and allow the composed parent to prune its last child Applications.
+func (p *Publisher) ensureValidationCleanupRoot(repo, envName string) error {
+	if err := p.writeFile(p.outputDir(repo, composedAppsDir, envName, ".gitkeep"), nil); err != nil {
+		return err
+	}
+	path := p.outputDir(repo, "_infra", envName+"-composed-appset.yaml")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var root Application
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	if root.Spec.SyncPolicy == nil || root.Spec.SyncPolicy.Automated == nil {
+		return nil
+	}
+	root.Spec.SyncPolicy.Automated.AllowEmpty = true
+	data, err = yaml.Marshal(root)
+	if err != nil {
+		return err
+	}
+	return p.writeFile(path, data)
 }

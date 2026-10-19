@@ -1369,6 +1369,11 @@ func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string,
 		if err := p.writeFile(p.outputDir(repoDir, "_infra", envName+"-composed-appset.yaml"), rootBytes); err != nil {
 			return err
 		}
+		if app.Spec.CD.EphemeralValidation() && envName == app.Spec.CD.ReleaseValidationEnvironment {
+			if err := p.ensureValidationCleanupRoot(repoDir, envName); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
