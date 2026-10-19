@@ -4474,6 +4474,29 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	// real status: its component workloads are NOT labelled instance={app}, so the
 	// old single instance={app} query read every composed app as "not deployed".
 	instances := ah.appWorkloadInstances(ctx, env.ProjectName, appName)
+	var previewOwners []string
+	if env.EnvType == domain.AppEnvPreview {
+		if ah.appStore != nil {
+			if app, err := ah.appOnce(ctx, env.ProjectName, appName); err == nil && app != nil && app.Spec.IsComposed() {
+				enabled := map[string]bool{}
+				for _, c := range app.Spec.ComposedComponents() {
+					enabled[c.Name] = c.Template != nil && c.EnabledInPreview()
+				}
+				filtered := make([]domain.WorkloadInstance, 0, len(instances))
+				for _, wi := range instances {
+					if enabled[wi.Component] {
+						filtered = append(filtered, wi)
+					}
+				}
+				instances = filtered
+			}
+		}
+		owner := appName + "-" + env.EnvName
+		previewOwners = append(previewOwners, owner, owner+"-platform")
+		for _, component := range ah.appStatefulComponents(ctx, env.ProjectName, appName) {
+			previewOwners = append(previewOwners, owner+"-"+component)
+		}
+	}
 
 	// No remote routing (single-cluster / fake mode): query the local provider.
 	if !routed {
@@ -4483,7 +4506,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 		// Prefer label-based app-native discovery when the provider is a real
 		// K8s provider; fakes/tests only implement the name-based interface.
 		if kp, ok := ah.runtimeProvider.(*runtime.K8sProvider); ok {
-			ah.applyComponentRuntimes(env, instances, runtimeByComponent(ctx, kp, env.Namespace, instances))
+			ah.applyComponentRuntimes(env, instances, runtimeByComponent(ctx, kp, env.Namespace, instances, previewOwners...))
 			return
 		}
 		if info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName); err == nil {
@@ -4525,7 +4548,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 				return org.EffectiveSecureEndpoints()
 			})
 		}
-		perCluster[i] = runtimeByComponent(ctx, prov, env.Namespace, instances)
+		perCluster[i] = runtimeByComponent(ctx, prov, env.Namespace, instances, previewOwners...)
 	})
 
 	// compAgg: component name → RuntimeInfo aggregated across all reachable clusters.
@@ -4606,7 +4629,10 @@ func (ah *appHandler) appStatefulComponents(ctx context.Context, project, appNam
 // undeployed. Omitting them keeps them out of the aggregate and the per-component
 // list, so the UI renders their row at the app's phase with "—" replicas. A
 // failed migration still surfaces via the app's ArgoCD sync diagnostics.
-func runtimeByComponent(ctx context.Context, kp *runtime.K8sProvider, namespace string, instances []domain.WorkloadInstance) map[string]*runtime.RuntimeInfo {
+func runtimeByComponent(ctx context.Context, kp *runtime.K8sProvider, namespace string, instances []domain.WorkloadInstance, owners ...string) map[string]*runtime.RuntimeInfo {
+	if len(owners) > 0 {
+		kp = kp.WithApplicationScope(owners...)
+	}
 	infos := make([]*runtime.RuntimeInfo, len(instances))
 	runBounded(len(instances), 4, func(i int) {
 		wi := instances[i]

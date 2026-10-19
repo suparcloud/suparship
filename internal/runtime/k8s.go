@@ -43,7 +43,8 @@ var statusRank = map[string]int{
 // K8sProvider reads runtime state from Kubernetes workloads (Deployments,
 // StatefulSets, DaemonSets), Ingresses, and Gateway-API HTTPRoutes.
 type K8sProvider struct {
-	client kubernetes.Interface
+	client           kubernetes.Interface
+	applicationScope map[string]bool
 	// dyn lists Gateway-API HTTPRoutes (a CRD, not in the typed clientset).
 	// Optional: nil disables HTTPRoute endpoint discovery (Ingress still works).
 	dyn dynamic.Interface
@@ -52,6 +53,29 @@ type K8sProvider struct {
 	// true. Ingress URLs are unaffected — their scheme is derived from the
 	// live spec.tls.
 	secure func() bool
+}
+
+// WithApplicationScope returns an independent reader restricted to Argo-owned resources.
+// Preview releases share Helm instance labels, so labels alone cannot isolate them.
+func (p *K8sProvider) WithApplicationScope(names ...string) *K8sProvider {
+	copy := *p
+	copy.applicationScope = make(map[string]bool, len(names))
+	for _, name := range names {
+		copy.applicationScope[name] = true
+	}
+	return &copy
+}
+
+func (p *K8sProvider) ownsResource(obj metav1.Object) bool {
+	if p.applicationScope == nil {
+		return true
+	}
+	tracking := obj.GetAnnotations()["argocd.argoproj.io/tracking-id"]
+	if tracking != "" {
+		owner, _, _ := strings.Cut(tracking, ":")
+		return p.applicationScope[owner]
+	}
+	return p.applicationScope[obj.GetLabels()["argocd.argoproj.io/instance"]]
 }
 
 // NewK8sProvider creates a Kubernetes-backed runtime provider. dyn may be nil to
@@ -163,6 +187,9 @@ func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fa
 			// Resource-only app: deployed, no pods. Healthy with no replicas.
 			return &RuntimeInfo{Status: StatusHealthy, IngressURLs: routeURLs, Namespace: namespace}, nil
 		}
+		if p.applicationScope != nil {
+			return &RuntimeInfo{Status: StatusNotDeployed, Namespace: namespace}, nil
+		}
 		// Nothing labelled — name-based fallback (pre-label / single-workload apps).
 		return p.GetServiceRuntime(ctx, namespace, fallbackName)
 	}
@@ -227,6 +254,9 @@ func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector st
 		}
 		if ingList != nil {
 			for i := range ingList.Items {
+				if !p.ownsResource(&ingList.Items[i]) {
+					continue
+				}
 				ingFound = true
 				ingURLs = append(ingURLs, ingressHostURLs(&ingList.Items[i], p.secureEndpoints())...)
 			}
@@ -235,8 +265,11 @@ func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector st
 	go func() {
 		defer wg.Done()
 		if routes := p.listHTTPRoutes(ctx, namespace, selector); len(routes) > 0 {
-			rtFound = true
 			for _, rt := range routes {
+				if !p.ownsResource(&rt) {
+					continue
+				}
+				rtFound = true
 				rtURLs = append(rtURLs, httpRouteHostURLs(rt, p.secureEndpoints())...)
 			}
 		}
@@ -298,6 +331,9 @@ func (p *K8sProvider) listLabelledWorkloads(ctx context.Context, namespace, sele
 			}
 			out := make([]workload, 0, len(l.Items))
 			for i := range l.Items {
+				if !p.ownsResource(&l.Items[i]) {
+					continue
+				}
 				out = append(out, deploymentWorkload(&l.Items[i]))
 			}
 			return out, nil
@@ -309,6 +345,9 @@ func (p *K8sProvider) listLabelledWorkloads(ctx context.Context, namespace, sele
 			}
 			out := make([]workload, 0, len(l.Items))
 			for i := range l.Items {
+				if !p.ownsResource(&l.Items[i]) {
+					continue
+				}
 				out = append(out, statefulSetWorkload(&l.Items[i]))
 			}
 			return out, nil
@@ -320,6 +359,9 @@ func (p *K8sProvider) listLabelledWorkloads(ctx context.Context, namespace, sele
 			}
 			out := make([]workload, 0, len(l.Items))
 			for i := range l.Items {
+				if !p.ownsResource(&l.Items[i]) {
+					continue
+				}
 				out = append(out, daemonSetWorkload(&l.Items[i]))
 			}
 			return out, nil

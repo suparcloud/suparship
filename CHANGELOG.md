@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Scope preview runtime discovery to its Argo CD Applications so previews sharing
+  Helm labels cannot mix images, replicas, health, or endpoints. Skip components
+  excluded from previews when aggregating their runtime status.
+
 - Repair stuck ephemeral validation cleanup by keeping its composed manifest
   directory tracked and enabling empty-state pruning on its parent Application.
   Cleanup retries repair older dormant configurations before waiting for deletion.
