@@ -14,3 +14,17 @@ test('a checked shared repository exposes and repairs missing component bindings
   rules['example/app'].watched = false;
   assert.deepEqual(missingComponentImageBindings(discovered, rules, components), []);
 });
+
+test('cross-environment discovery saves web even when validation only discovers workers', () => {
+  const image = component => ({component, name:'image', repository:'example/app', tagKey:'image.tag'});
+  const staging = [image('web'), image('worker')];
+  const validation = [image('worker')];
+  const discovered = [...staging, ...validation];
+  const rules = {'example/app': {watched:true, tagPattern:'^[0-9a-f]{8}$', selectionStrategy:'NewestBuild'}};
+  const patch = imageRulesToComponentImages(discovered, rules, ['web', 'worker']);
+  assert.equal(patch.web.length, 1);
+  assert.equal(patch.worker.length, 1);
+  assert.equal(patch.web[0].tagKey, 'image.tag');
+  rules['example/app'].watched = false;
+  assert.deepEqual(imageRulesToComponentImages(discovered, rules, ['web', 'worker']), {web:[], worker:[]});
+});

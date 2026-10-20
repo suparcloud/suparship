@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Discover Manage components CD images across editable environments so saving
+  release-validation settings does not drop base-only image bindings. Block saves
+  during failed or pending discovery instead of treating failures as empty results.
+
 - Reject composed CD publishes that replace an existing image tag with an empty
   tag for the same repository, even when an image binding is missing.
 

@@ -214,6 +214,7 @@ export function imageRulesToComponentImages(
     if (!repo || !img.component) continue;
     const r = resolve(repo);
     if (!r) continue;
+    if (out[img.component]?.some((binding) => binding.tagKey === img.tagKey)) continue;
     (out[img.component] ??= []).push({
       name: img.name,
       tagKey: img.tagKey,

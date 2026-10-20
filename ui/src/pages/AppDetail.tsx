@@ -5305,6 +5305,7 @@ function ComponentsTable({
   const [manageDiscovered, setManageDiscovered] = useState<TemplateImage[]>([]);
   const [manageRules, setManageRules] = useState<ImageRules>({});
   const [manageImagesLoading, setManageImagesLoading] = useState(false);
+  const [manageImagesError, setManageImagesError] = useState<string | null>(null);
   // Repos present when manage mode OPENED. A repo missing from this set appeared
   // mid-session, so an absent saved binding means "new", not "the user disabled it" —
   // see seedImageRules' knownRepos. null until the first discovery lands.
@@ -5321,9 +5322,8 @@ function ComponentsTable({
         .map((e) => e.envName),
     ),
   ];
-  // The env discovery runs against: the one being viewed, else the first stable env.
-  // Bindings are app-wide (keyed by tag key), so one env is enough to find the repos —
-  // a repo set ONLY in another env's override surfaces when that env is viewed.
+  // The selected environment remains the canvas editing scope. Image discovery
+  // covers every editable environment because CD bindings are app-wide.
   const discEnv = currentEnv?.envName ?? manageEnvs[0] ?? "";
 
   function beginManage() {
@@ -5354,7 +5354,7 @@ function ComponentsTable({
     .map(
       (d) =>
         `${d.name}:${d.template}:${JSON.stringify(d.values)}:${JSON.stringify(
-          d.envValues[discEnv] ?? {},
+          d.envValues,
         )}`,
     )
     .join("|");
@@ -5366,16 +5366,17 @@ function ComponentsTable({
     const composedDraft = drafts.length > 1;
     let cancelled = false;
     setManageImagesLoading(true);
+    setManageImagesError(null);
     // The first pass runs immediately so it reflects the UNEDITED drafts — that result
     // is the session baseline, and a fast edit must not be able to poison it.
     const delay = baselineReposRef.current === null ? 0 : 400;
     const handle = setTimeout(() => {
       Promise.all(
-        drafts.map((d) =>
+        drafts.flatMap((d) => manageEnvs.map((imageEnv) =>
           d.template
             ? previewTemplateEffectiveValues(
                 d.template,
-                discEnv,
+                imageEnv,
                 "",
                 {
                   // The component's effective overlay is its legacy all-envs base
@@ -5383,7 +5384,7 @@ function ComponentsTable({
                   // DiscoverComponentImages as (values, envOverlay).
                   defaultValues: mergeOverlay(
                     d.values,
-                    d.envValues[discEnv] ?? {},
+                    d.envValues[imageEnv] ?? {},
                   ),
                 },
                 false, // preview
@@ -5396,18 +5397,23 @@ function ComponentsTable({
                     component: composedDraft ? d.name.trim() : undefined,
                   })),
                 )
-                .catch(() => [] as TemplateImage[])
-            : Promise.resolve([] as TemplateImage[]),
+            : Promise.resolve([] as TemplateImage[])),
         ),
       ).then((lists) => {
         if (cancelled) return;
-        const flat = lists.flat();
+        const flat = [...new Map(lists.flat().map((img) => [
+          `${img.component ?? ""}:${img.tagKey}:${img.repository}`, img,
+        ])).values()];
         if (baselineReposRef.current === null) {
           baselineReposRef.current = new Set(
             groupByRepo(flat).map((g) => g.repository),
           );
         }
         setManageDiscovered(flat);
+        setManageImagesLoading(false);
+      }).catch(() => {
+        if (cancelled) return;
+        setManageImagesError("Could not discover component images. Reopen Manage components to retry before saving.");
         setManageImagesLoading(false);
       });
     }, delay);
@@ -5441,6 +5447,7 @@ function ComponentsTable({
   }, [managing, manageDiscovered, data]);
 
   async function saveManage() {
+    if (!isDirect && (manageImagesLoading || manageImagesError)) return;
     if (drafts.length === 0) {
       setManageError("Add at least one component.");
       return;
@@ -5648,8 +5655,7 @@ function ComponentsTable({
             <div className="border-t border-gray-100 pt-4">
               <p className="text-sm font-medium text-gray-700">Images (CD pull)</p>
               <p className="mb-3 mt-1 text-xs text-gray-400">
-                Detected from these components' values
-                {discEnv ? ` for ${discEnv}` : ""}. One rule per unique image — pick
+                Detected from these components' values across environments. One rule per unique image — pick
                 which Kargo watches and how it selects tags.
               </p>
               <ImagePullRules
@@ -5660,12 +5666,13 @@ function ComponentsTable({
               />
             </div>
           )}
+          {manageImagesError && <p className="text-sm text-red-600">{manageImagesError}</p>}
           {manageError && <p className="text-sm text-red-600">{manageError}</p>}
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={saveManage}
-              disabled={manageSaving}
+              disabled={manageSaving || (!isDirect && (manageImagesLoading || !!manageImagesError))}
               className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {manageSaving ? "Saving…" : "Save components"}
