@@ -317,3 +317,23 @@ still require the validation-only disposable policy and temporary storage.
 
 Wait for an ephemeral validator to be **Idle** before changing component selection.
 The UI labels excluded components and omits them from validation runtime totals.
+
+### Reconciliation latency
+
+Suparship generates Kargo Warehouses with `spec.interval: 1m0s`, instead of
+inheriting Kargo's five-minute discovery interval. This increases registry polling
+frequency; registry throttling and discovery duration can still delay new Freight.
+
+After validation preparation or cleanup is published, Suparship requests a refresh
+of the owning composed parent Application or single-chart ApplicationSets, then
+refreshes existing workload Applications. While validation is waiting or running,
+the 15-second lifecycle loop repeats this scoped refresh so Kargo's activation
+commit does not have to wait for Argo CD's normal reconciliation timer. Idle and
+failed-retention runs do not receive these periodic refreshes.
+
+These are reconciliation requests, not forced promotions: health, acceptance
+checks and scheduler handoff remain required. One-minute discovery is not a
+one-minute deployment guarantee; image pulls, startup, tests and controller load
+still contribute. Existing Warehouses receive the new interval when their app's
+GitOps configuration is republished and applied. The running Suparship service
+must be upgraded to use the new refresh behavior.

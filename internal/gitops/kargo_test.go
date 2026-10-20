@@ -21,6 +21,9 @@ func TestBuildKargoWarehouse(t *testing.T) {
 		}},
 	})
 
+	if wh.Spec.Interval != "1m0s" {
+		t.Fatalf("unexpected discovery interval: %s", wh.Spec.Interval)
+	}
 	if wh.APIVersion != "kargo.akuity.io/v1alpha1" {
 		t.Errorf("APIVersion: got %q want %q", wh.APIVersion, "kargo.akuity.io/v1alpha1")
 	}

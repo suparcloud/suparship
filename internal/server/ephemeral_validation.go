@@ -52,6 +52,15 @@ func (ah *appHandler) reconcileEphemeralValidation(ctx context.Context, app *dom
 			return nil
 		}
 		app = latest
+		// Kargo commits activation after preparation. Wake the owning parent while
+		// waiting/running so that commit does not wait for Argo's multi-minute poll.
+		if validationNeedsRefresh(run.Phase) {
+			if refresher, ok := publisher.(interface {
+				RefreshValidation(context.Context, *domain.App, *domain.AppEnvironment)
+			}); ok {
+				refresher.RefreshValidation(ctx, app, env)
+			}
+		}
 		ready, err := controller.DownstreamSchedulerReady(ctx, app.ProjectName, app.Name, envName)
 		if err != nil {
 			return err
@@ -232,4 +241,8 @@ func (ah *appHandler) runEphemeralValidationOnce(ctx context.Context) {
 			ah.reconcileEphemeralValidation(ctx, app)
 		}
 	}
+}
+
+func validationNeedsRefresh(phase string) bool {
+	return phase == "waiting" || phase == "running"
 }

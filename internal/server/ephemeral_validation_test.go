@@ -174,3 +174,11 @@ func TestIdleValidationMigratesWithoutRevalidatingFreight(t *testing.T) {
 		t.Fatalf("migration lost release history: %+v", run)
 	}
 }
+
+func TestValidationRefreshOnlyWhileWaitingForActivationOrVerification(t *testing.T) {
+	for _, phase := range []string{"idle", "provisioning", "waiting", "running", "failed", "cleaning", "deleting"} {
+		if got := validationNeedsRefresh(phase); got != (phase == "waiting" || phase == "running") {
+			t.Fatalf("unexpected refresh in %s", phase)
+		}
+	}
+}

@@ -838,6 +838,26 @@ func (a *gitOpsPublisherAdapter) refreshApps(ctx context.Context, project string
 	}
 }
 
+// RefreshValidation wakes the manifest owner as well as existing workloads.
+// Refreshing a child alone cannot discover a changed Application spec in Git.
+func (a *gitOpsPublisherAdapter) RefreshValidation(ctx context.Context, app *domain.App, env *domain.AppEnvironment) {
+	if a.argoRefresher == nil {
+		return
+	}
+	if app.Spec.IsComposed() {
+		if named, ok := a.argoRefresher.(interface {
+			RefreshAppsByName(context.Context, []string) error
+		}); ok {
+			if err := named.RefreshAppsByName(ctx, []string{env.EnvName + "-composed"}); err != nil {
+				slog.Warn("validation parent refresh failed; falling back to poll", "env", env.EnvName, "err", err)
+			}
+		}
+	} else if err := a.argoRefresher.RefreshAppSets(ctx, []string{env.EnvName, env.EnvName + "-external"}); err != nil {
+		slog.Warn("validation ApplicationSet refresh failed; falling back to poll", "env", env.EnvName, "err", err)
+	}
+	a.refreshApps(ctx, app.ProjectName, app.Name)
+}
+
 // resolveTemplate resolves a template by name live (cluster overrides built-in)
 // via the shared server.ResolveTemplates so the publish path agrees with the
 // gallery / app-creation lookups.
@@ -3164,7 +3184,7 @@ func (a *gitOpsPublisherAdapter) SetValidationWorkloads(ctx context.Context, app
 	if err = a.inner.SetValidationWorkloads(ctx, app, pub, active); err != nil {
 		return err
 	}
-	a.refreshApps(ctx, app.ProjectName, app.Name)
+	a.RefreshValidation(ctx, app, env)
 	return nil
 }
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reduce generated Kargo Warehouse discovery polling to one minute and refresh
+  validation manifest owners during preparation, activation and cleanup, avoiding
+  multi-minute Argo CD polling waits without bypassing release checks.
+
 - Add per-component release-validation inclusion, enabled by default and independent
   of previews. Excluded components are omitted from validation workloads, Kargo
   updates, health checks and runtime totals without changing stable environments.

@@ -46,6 +46,8 @@ type KargoWarehouse struct {
 
 // WarehouseSpec configures the artifact subscriptions for a Kargo Warehouse.
 type WarehouseSpec struct {
+	// Interval bounds discovery latency instead of inheriting Kargo's five-minute default.
+	Interval string `yaml:"interval,omitempty"`
 	// FreightCreationPolicy controls how Freight objects are created:
 	//   "Automatic" — one Freight per new image tag (default).
 	FreightCreationPolicy string                  `yaml:"freightCreationPolicy,omitempty"`
@@ -286,6 +288,7 @@ func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehous
 		},
 		Spec: WarehouseSpec{
 			FreightCreationPolicy: "Automatic",
+			Interval:              "1m0s",
 			Subscriptions:         subs,
 		},
 	}
