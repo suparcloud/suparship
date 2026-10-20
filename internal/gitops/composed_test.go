@@ -1591,7 +1591,7 @@ func TestComposedTemplateResolvedTagPreservedAndPinned(t *testing.T) {
 			Components: []domain.ComponentSpec{
 				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
 					Template: &domain.AppTemplateRef{Name: "byo-chart"},
-					Values:   map[string]any{"image": map[string]any{"tag": ""}}},
+					Values:   map[string]any{"image": map[string]any{"repository": "ghcr.io/bigly/web", "tag": ""}}},
 			},
 		},
 	}
@@ -1650,6 +1650,15 @@ func TestComposedTemplateResolvedTagPreservedAndPinned(t *testing.T) {
 	if got := readTag(); got != "pr-894-f668d0b1" {
 		t.Fatalf("pinned tag = %q", got)
 	}
+	// Reproduce an incomplete saved group: neither explicit nor resolved bindings
+	// remain, but the stored overlay still has an empty tag. Publishing must fail
+	// rather than committing that empty tag over the restored release.
+	envs[0].ComponentTemplateImages = nil
+	app.Spec.EnvironmentDefaults = nil
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err == nil || !strings.Contains(err.Error(), "refusing to clear image tag") {
+		t.Fatalf("missing binding publish must reject cleared tag, got %v", err)
+	}
+
 }
 
 // TestComposedPromoteMaterializesEnv verifies the composed promote path writes a

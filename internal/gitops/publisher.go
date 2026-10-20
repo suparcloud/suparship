@@ -1100,10 +1100,24 @@ func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string,
 		// (the composed analog of the single-source preserveTag). Keyed
 		// cluster → component → tagKey → tag.
 		preservedTags := map[string]map[string]map[string]string{}
+		previousValues := map[string]map[string]map[string]any{}
 		if app.Spec.CD.Managed {
 			for _, target := range targets {
 				for _, c := range app.Spec.ComposedComponents() {
 					vp := p.appEnvDir(repoDir, env, compValueParts(target.Name, c.Name)...)
+					if raw, err := os.ReadFile(vp); err == nil {
+						var values map[string]any
+						if err := yaml.Unmarshal(raw, &values); err != nil {
+							return fmt.Errorf("read existing component values: %w", err)
+						}
+						if previousValues[target.Name] == nil {
+							previousValues[target.Name] = map[string]map[string]any{}
+						}
+						previousValues[target.Name][c.Name] = values
+					} else if !os.IsNotExist(err) {
+						return fmt.Errorf("read existing component values: %w", err)
+					}
+
 					for _, tagKey := range componentPublishTagKeys(c, env) {
 						if tag := existingImageTag(vp, tagKey); tag != "" {
 							if preservedTags[target.Name] == nil {
@@ -1281,6 +1295,9 @@ func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string,
 					for _, tagKey := range componentPublishTagKeys(c, env) {
 						setStringAtPath(overlay, tagKey, pinnedTag)
 					}
+				}
+				if key := clearedImageTag(previousValues[target.Name][c.Name], overlay, ""); key != "" {
+					return fmt.Errorf("refusing to clear image tag %s for component %q in %s; save its image binding in Images (CD pull) or set an explicit image tag", key, c.Name, env.EnvName)
 				}
 				// Suspend: toggle this component's suspend key on. Only written when
 				// suspended, so resume drops back to the chart default (running). Use the

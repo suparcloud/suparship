@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject composed CD publishes that replace an existing image tag with an empty
+  tag for the same repository, even when an image binding is missing.
+
 - Detect incomplete component bindings behind a checked shared image rule and
   enable Save to apply that rule to every listed component.
 
