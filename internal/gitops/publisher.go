@@ -1005,6 +1005,23 @@ func (p *Publisher) pruneComponentProjections(repoDir string, env AppPublishEnv,
 	return nil
 }
 
+// componentPublishTagKeys includes template-resolved bindings as well as explicit
+// selections, so automatic CD bindings receive the same preservation and pinning.
+func componentPublishTagKeys(c domain.ComponentSpec, env AppPublishEnv) []string {
+	keys := componentImageTagKeys(c.Images)
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		seen[key] = true
+	}
+	for _, img := range env.ComponentTemplateImages[c.Name] {
+		if img.TagKey != "" && !seen[img.TagKey] {
+			keys = append(keys, img.TagKey)
+			seen[img.TagKey] = true
+		}
+	}
+	return keys
+}
+
 func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	orgName := p.cfg.OrgName
 	if orgName == "" {
@@ -1087,15 +1104,15 @@ func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string,
 			for _, target := range targets {
 				for _, c := range app.Spec.ComposedComponents() {
 					vp := p.appEnvDir(repoDir, env, compValueParts(target.Name, c.Name)...)
-					for _, img := range c.Images {
-						if tag := existingImageTag(vp, img.TagKey); tag != "" {
+					for _, tagKey := range componentPublishTagKeys(c, env) {
+						if tag := existingImageTag(vp, tagKey); tag != "" {
 							if preservedTags[target.Name] == nil {
 								preservedTags[target.Name] = map[string]map[string]string{}
 							}
 							if preservedTags[target.Name][c.Name] == nil {
 								preservedTags[target.Name][c.Name] = map[string]string{}
 							}
-							preservedTags[target.Name][c.Name][img.TagKey] = tag
+							preservedTags[target.Name][c.Name][tagKey] = tag
 						}
 					}
 				}
@@ -1260,9 +1277,9 @@ func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string,
 				// Pin wins over the preserved/promoted tag: freeze each of this
 				// component's image tag key(s) to the pinned tag so a republish (or a
 				// newer promoted image) can't override the pin until it's cleared.
-				if pinnedTag != "" && len(c.Images) > 0 {
-					for _, img := range c.Images {
-						setStringAtPath(overlay, img.TagKey, pinnedTag)
+				if pinnedTag != "" {
+					for _, tagKey := range componentPublishTagKeys(c, env) {
+						setStringAtPath(overlay, tagKey, pinnedTag)
 					}
 				}
 				// Suspend: toggle this component's suspend key on. Only written when

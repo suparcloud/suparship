@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve template-resolved component image tags during Sync to Git and apply
+  stable-environment pins to those bindings, preventing empty overlay tags from
+  replacing promoted or pinned releases.
+
 - Reduce generated Kargo Warehouse discovery polling to one minute and refresh
   validation manifest owners during preparation, activation and cleanup, avoiding
   multi-minute Argo CD polling waits without bypassing release checks.

@@ -1574,6 +1574,84 @@ func TestComposedTagPreservedOnRepublish(t *testing.T) {
 	}
 }
 
+func TestComposedTemplateResolvedTagPreservedAndPinned(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:       "https://git/repo.git",
+		ArgoCDRepoURL: "https://git/repo.git",
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo-chart"},
+			CD:       domain.CDConfig{Managed: true},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"},
+					Values:   map[string]any{"image": map[string]any{"tag": ""}}},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		ComponentTemplateImages: map[string][]gitops.KargoImage{"web": {{Name: "web", Repository: "ghcr.io/bigly/web", TagKey: "image.tag"}}},
+		Clusters:                []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+	}}
+	vpath := filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", "web", "values.yaml")
+
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("initial publish: %v", err)
+	}
+	readTag := func() string {
+		raw, err := os.ReadFile(vpath)
+		if err != nil {
+			t.Fatalf("read values: %v", err)
+		}
+		var m map[string]any
+		if err := yaml.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		img, _ := m["image"].(map[string]any)
+		if img == nil {
+			return ""
+		}
+		s, _ := img["tag"].(string)
+		return s
+	}
+	if got := readTag(); got != "" {
+		t.Fatalf("initial image.tag = %q, want empty seed", got)
+	}
+
+	// Simulate a Kargo promotion committing a new tag into the values file.
+	if err := os.WriteFile(vpath, []byte("image:\n  tag: promoted-abc123\n"), 0o644); err != nil {
+		t.Fatalf("simulate promote: %v", err)
+	}
+
+	// Republish — the promoted tag must survive (not reset to the "seed" overlay).
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	if got := readTag(); got != "promoted-abc123" {
+		t.Errorf("republish reset the tag to %q, want promoted-abc123 preserved", got)
+	}
+
+	// A stable environment pin must override the previously promoted tag even
+	// when there is no explicit ComponentSpec.Images selection.
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"staging": {PinnedImageTag: "pr-894-f668d0b1"},
+	}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("pinned republish: %v", err)
+	}
+	if got := readTag(); got != "pr-894-f668d0b1" {
+		t.Fatalf("pinned tag = %q", got)
+	}
+}
+
 // TestComposedPromoteMaterializesEnv verifies the composed promote path writes a
 // target env's component values + rendered Application (so a higher env exists).
 func TestComposedPromoteMaterializesEnv(t *testing.T) {
