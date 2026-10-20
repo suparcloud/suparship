@@ -79,8 +79,10 @@ type ComponentSummaryDTO struct {
 	// (explicit PreviewEnabled, else the type default). The detail page shows a
 	// "no preview" badge when false. PreviewEnabled carries the raw stored override
 	// (nil when defaulting) so the editor can distinguish default from explicit.
-	EnabledInPreview bool  `json:"enabledInPreview"`
-	PreviewEnabled   *bool `json:"previewEnabled,omitempty"`
+	EnabledInPreview           bool  `json:"enabledInPreview"`
+	PreviewEnabled             *bool `json:"previewEnabled,omitempty"`
+	ReleaseValidationEnabled   *bool `json:"releaseValidationEnabled,omitempty"`
+	EnabledInReleaseValidation bool  `json:"enabledInReleaseValidation"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment
@@ -379,7 +381,8 @@ type ComponentCreateDTO struct {
 	ReleaseValidationDataPolicy string `json:"releaseValidationDataPolicy,omitempty"`
 	// PreviewEnabled overrides whether this component is included in preview envs.
 	// Omit (nil) for the type default (web/worker on; stateful + job/cron off).
-	PreviewEnabled *bool `json:"previewEnabled,omitempty"`
+	PreviewEnabled           *bool `json:"previewEnabled,omitempty"`
+	ReleaseValidationEnabled *bool `json:"releaseValidationEnabled,omitempty"`
 }
 
 // ComponentEnvVarDTO is one curated env entry (exactly one source set).

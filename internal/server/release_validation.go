@@ -25,7 +25,7 @@ func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain
 		if c.ReleaseValidationDataPolicy == "disposable" && !c.Stateful {
 			return fmt.Errorf("component %q: disposable validation data policy is only for stateful components", c.Name)
 		}
-		if app.Spec.CD.EphemeralValidation() && c.Stateful && c.ReleaseValidationDataPolicy != "disposable" {
+		if app.Spec.CD.EphemeralValidation() && c.EnabledInReleaseValidation() && c.Stateful && c.ReleaseValidationDataPolicy != "disposable" {
 			return fmt.Errorf("component %q retains state by default; mark it disposable during release validation and disable persistence in its validation values, or use persistent validation", c.Name)
 		}
 	}
@@ -34,6 +34,15 @@ func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain
 	}
 	if name == "" {
 		return nil
+	}
+	included := 0
+	for _, c := range app.Spec.Components {
+		if c.EnabledInReleaseValidation() {
+			included++
+		}
+	}
+	if len(app.Spec.Components) > 0 && included == 0 {
+		return fmt.Errorf("include at least one component in release validation")
 	}
 	if !app.Spec.CD.Managed {
 		return fmt.Errorf("release validation requires image tags managed by Kargo")
@@ -130,4 +139,22 @@ func (ah *appHandler) validationNamePattern(ctx context.Context, project, app, e
 		}
 	}
 	return pattern
+}
+
+func validationSelectionChanged(before, after []domain.ComponentSpec) bool {
+	names := map[string]bool{}
+	for _, c := range before {
+		if c.EnabledInReleaseValidation() {
+			names[c.Name] = true
+		}
+	}
+	for _, c := range after {
+		if c.EnabledInReleaseValidation() {
+			if !names[c.Name] {
+				return true
+			}
+			delete(names, c.Name)
+		}
+	}
+	return len(names) != 0
 }

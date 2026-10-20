@@ -277,6 +277,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			Stateful:                    c.Stateful,
 			ReleaseValidationDataPolicy: c.ReleaseValidationDataPolicy,
 			PreviewEnabled:              c.PreviewEnabled,
+			ReleaseValidationEnabled:    c.ReleaseValidationEnabled,
 		}
 		for _, e := range c.EnvVars {
 			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
@@ -1092,8 +1093,8 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			var result any
 			err := controller.WithValidationLease(ctx, projectName, appName, prevCD.ReleaseValidationEnvironment, func(ctx context.Context, run *domain.ValidationRun) error {
 				changed := prevCD.ReleaseValidationManaged != app.Spec.CD.ReleaseValidationManaged || prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode || prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment
-				if changed && run.Phase != "idle" {
-					return fmt.Errorf("wait for validation cleanup to finish before changing lifecycle or validation environment")
+				if (changed || validationSelectionChanged(prevComponents, app.Spec.Components)) && run.Phase != "idle" {
+					return fmt.Errorf("wait for validation cleanup to finish before changing lifecycle, validation environment, or included components")
 				}
 				var err error
 				status, result, err = original(ctx)
@@ -4483,6 +4484,22 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	// real status: its component workloads are NOT labelled instance={app}, so the
 	// old single instance={app} query read every composed app as "not deployed".
 	instances := ah.appWorkloadInstances(ctx, env.ProjectName, appName)
+	if ah.appStore != nil {
+		if app, err := ah.appOnce(ctx, env.ProjectName, appName); err == nil && app != nil && env.EnvName == app.Spec.CD.ReleaseValidationEnvironment && app.Spec.IsComposed() {
+			enabled := map[string]bool{}
+			for _, c := range app.Spec.Components {
+				enabled[c.Name] = c.EnabledInReleaseValidation()
+			}
+			filtered := make([]domain.WorkloadInstance, 0, len(instances))
+			for _, instance := range instances {
+				if enabled[instance.Component] {
+					filtered = append(filtered, instance)
+				}
+			}
+			instances = filtered
+		}
+	}
+
 	var previewOwners []string
 	if env.EnvType == domain.AppEnvPreview {
 		if ah.appStore != nil {
@@ -4612,13 +4629,16 @@ func (ah *appHandler) appWorkloadInstances(ctx context.Context, project, appName
 // appStatefulComponents returns the names of a COMPOSED app's stateful components
 // (each of which renders as its own {argoAppName}-{component} ArgoCD Application).
 // Nil for single-source apps or when the app record can't be read.
-func (ah *appHandler) appStatefulComponents(ctx context.Context, project, appName string) []string {
+func (ah *appHandler) appStatefulComponents(ctx context.Context, project, appName string, envs ...string) []string {
 	if ah.appStore == nil {
 		return nil
 	}
 	app, err := ah.appOnce(ctx, project, appName)
 	if err != nil || app == nil || !app.Spec.IsComposed() {
 		return nil
+	}
+	if len(envs) > 0 {
+		app = domain.AppForReleaseValidation(app, envs[0])
 	}
 	var names []string
 	for _, c := range app.Spec.StatefulComponents() {
@@ -4878,7 +4898,14 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 	// Application named {argoAppName}-{component} (BuildComponentApplication), so a
 	// failed/degraded database sync would otherwise produce no diagnostic. Read
 	// each alongside the main app + platform companion.
-	statefulComps := ah.appStatefulComponents(ctx, env.ProjectName, appName)
+	statefulComps := ah.appStatefulComponents(ctx, env.ProjectName, appName, env.EnvName)
+	includeMain := true
+	if ah.appStore != nil {
+		if app, err := ah.appOnce(ctx, env.ProjectName, appName); err == nil && app != nil && app.Spec.IsComposed() && env.EnvName == app.Spec.CD.ReleaseValidationEnvironment {
+			selected := domain.AppForReleaseValidation(app, env.EnvName)
+			includeMain = len(selected.Spec.ComposedComponents()) > len(selected.Spec.StatefulComponents())
+		}
+	}
 	// Only tag diagnostics with a cluster when the env actually fans out, to keep
 	// single-cluster output unchanged.
 	multi := len(apps) > 1
@@ -4898,6 +4925,9 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 			targets = append(targets, struct{ app, source string }{ca.name + "-" + comp, "argocd"})
 		}
 		for _, t := range targets {
+			if !includeMain && t.app == ca.name {
+				continue
+			}
 			var diags []domain.Diagnostic
 			if useSnapshot {
 				diags = lookup(t.app, t.source)
@@ -5449,6 +5479,7 @@ func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []Componen
 			Stateful:                    c.Stateful,
 			ReleaseValidationDataPolicy: c.ReleaseValidationDataPolicy,
 			PreviewEnabled:              c.PreviewEnabled,
+			ReleaseValidationEnabled:    c.ReleaseValidationEnabled,
 		}
 		for _, e := range c.EnvVars {
 			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
@@ -5696,7 +5727,9 @@ func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]dom
 			Stateful:                    c.Stateful,
 			ReleaseValidationDataPolicy: c.ReleaseValidationDataPolicy,
 			EnabledInPreview:            c.EnabledInPreview(),
+			EnabledInReleaseValidation:  c.EnabledInReleaseValidation(),
 			PreviewEnabled:              c.PreviewEnabled,
+			ReleaseValidationEnabled:    c.ReleaseValidationEnabled,
 		}
 		if c.Template != nil {
 			dto.Template = c.Template.Name

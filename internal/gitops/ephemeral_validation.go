@@ -136,11 +136,13 @@ func (p *Publisher) ensureValidationCleanupRoot(repo, envName string) error {
 // Keep the Application identity for Kargo's continuous health checks, while
 // Argo prunes the disposable workloads using an empty Git source.
 func (p *Publisher) parkValidationApplications(repo string, app *domain.App, env AppPublishEnv) error {
+	composed := app.Spec.IsComposed()
+	app = domain.AppForReleaseValidation(app, env.EnvName)
 	emptyPath := joinSubPath(p.cfg.SubPath, ".suparship", "validation-empty")
 	if err := p.writeFile(filepath.Join(repo, emptyPath, ".gitkeep"), nil); err != nil {
 		return err
 	}
-	if !app.Spec.IsComposed() {
+	if !composed {
 		for _, tree := range []string{"envs", "envs-external"} {
 			root := p.outputDir(repo, tree, env.EnvName, app.ProjectName, app.Name, "_targets")
 			err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
@@ -180,6 +182,7 @@ func (p *Publisher) parkValidationApplications(repo string, app *domain.App, env
 	if len(targets) == 0 {
 		targets = []ClusterTarget{{Name: env.ClusterRef}}
 	}
+	expected := map[string]bool{}
 	for _, target := range targets {
 		cluster := target.Name
 		if cluster == "" {
@@ -193,6 +196,7 @@ func (p *Publisher) parkValidationApplications(repo string, app *domain.App, env
 			files = append(files, c.Name+"-application.yaml")
 		}
 		for _, filename := range files {
+			expected[p.outputDir(repo, composedAppsDir, env.EnvName, app.ProjectName, app.Name, "_targets", cluster, filename)] = true
 			data, err := os.ReadFile(filepath.Join(saved, cluster+"-"+filename))
 			if os.IsNotExist(err) {
 				continue
@@ -219,6 +223,23 @@ func (p *Publisher) parkValidationApplications(repo string, app *domain.App, env
 				return err
 			}
 		}
+	}
+
+	// Selection changes while idle must not leave excluded Application shells.
+	root := p.outputDir(repo, composedAppsDir, env.EnvName, app.ProjectName, app.Name, "_targets")
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && !expected[path] {
+			return os.Remove(path)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	return p.ensureValidationCleanupRoot(repo, env.EnvName)

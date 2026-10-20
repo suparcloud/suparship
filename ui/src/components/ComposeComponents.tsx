@@ -68,6 +68,8 @@ export interface ComponentDraft {
   stateful: boolean;
   /** effective preview inclusion — whether this component renders in preview envs */
   previewEnabled: boolean;
+  releaseValidationEnabled: boolean;
+  releaseValidationDataPolicy?: "retain" | "disposable" | "";
 }
 
 // envTextsFromValues seeds the per-env editor text map from stored per-env overlays,
@@ -182,6 +184,7 @@ export function newComponentDraft(
     images: [],
     stateful: isAddon,
     previewEnabled: defaultPreview(type, isAddon),
+    releaseValidationEnabled: true,
   };
 }
 
@@ -208,6 +211,8 @@ export function draftFromSummary(c: ComponentSummary): ComponentDraft {
     stateful: c.stateful ?? false,
     // Effective preview inclusion from the backend (explicit override or type default).
     previewEnabled: c.enabledInPreview,
+    releaseValidationEnabled: c.enabledInReleaseValidation ?? c.releaseValidationEnabled ?? true,
+    releaseValidationDataPolicy: c.releaseValidationDataPolicy,
   };
 }
 
@@ -254,6 +259,8 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
     envVars: envVars.length > 0 ? envVars : undefined,
     images: images.length > 0 ? images : undefined,
     stateful: d.stateful ? true : undefined,
+    releaseValidationEnabled: d.releaseValidationEnabled,
+    releaseValidationDataPolicy: d.releaseValidationDataPolicy,
     // Send an explicit preview override only when it differs from the type default,
     // so a component left at its default keeps nil (default) semantics server-side.
     previewEnabled:
@@ -1027,6 +1034,19 @@ export function ComposeComponents({
               <p className="mt-1 text-xs text-gray-400">
                 Rendered into ephemeral PR preview envs when on. Defaults:
                 web/worker on; databases and one-shot job/cron off.
+              </p>
+            </div>
+
+            <div className="mt-3">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" className="h-4 w-4 rounded border-gray-300"
+                  checked={c.releaseValidationEnabled}
+                  onChange={(ev) => update(i, { releaseValidationEnabled: ev.target.checked })} />
+                Include in release validation
+              </label>
+              <p className="mt-1 text-xs text-gray-400">
+                Included by default. Turn off to omit this component from release validation only.
+                Included components must be able to run without it or use an external dependency.
               </p>
             </div>
 

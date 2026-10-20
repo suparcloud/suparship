@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add per-component release-validation inclusion, enabled by default and independent
+  of previews. Excluded components are omitted from validation workloads, Kargo
+  updates, health checks and runtime totals without changing stable environments.
+
 - Retain empty Argo CD Applications after ephemeral validation cleanup so Kargo
   health checks remain valid. Wait for workload pruning before reusing capacity,
   and migrate previously idle validators without replaying verified releases.

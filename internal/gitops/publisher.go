@@ -720,7 +720,7 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 		// the app-wide pin — sync each distinct one too (syncChart dedups an
 		// already-present immutable version).
 		for _, env := range deployEnvs {
-			envApp := domain.AppForEnvTemplateVersions(app, env.EnvName)
+			envApp := domain.AppForEnvTemplateVersions(domain.AppForReleaseValidation(app, env.EnvName), env.EnvName)
 			if v := envApp.Spec.Template.Version; v != app.Spec.Template.Version {
 				if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name, v); err != nil {
 					return fmt.Errorf("sync chart for template %s@%s (env %s): %w", app.Spec.Template.Name, v, env.EnvName, err)
@@ -775,7 +775,7 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 	// Env-scoped template pins: sync any per-env component versions that differ
 	// from the app-wide pins (syncChart dedups already-present versions).
 	for _, env := range deployEnvs {
-		envApp := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		envApp := domain.AppForEnvTemplateVersions(domain.AppForReleaseValidation(app, env.EnvName), env.EnvName)
 		if envApp == app {
 			continue
 		}
@@ -1031,7 +1031,7 @@ func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string,
 		// Env-scoped template pins: everything below renders THIS env's effective
 		// template versions (chart source paths in the Application), so an
 		// upgraded staging runs the new chart while production keeps its own.
-		app := domain.AppForEnvTemplateVersions(ValidationApp(app, env.BaseEnv), env.EnvName)
+		app := domain.AppForEnvTemplateVersions(domain.AppForReleaseValidation(ValidationApp(app, env.BaseEnv), env.EnvName), env.EnvName)
 		dormant, err := p.validationDormant(repoDir, app, env)
 		if err != nil {
 			return err
@@ -1418,7 +1418,7 @@ func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppP
 func (p *Publisher) publishComposedAppEnv(ctx context.Context, repoDir string, app *domain.App, env AppPublishEnv) error {
 	// Sync THIS env's effective chart versions (env-scoped template pins) so a
 	// promotion into an env that pins a different version finds its bytes.
-	envApp := domain.AppForEnvTemplateVersions(app, env.EnvName)
+	envApp := domain.AppForEnvTemplateVersions(domain.AppForReleaseValidation(app, env.EnvName), env.EnvName)
 	for _, c := range envApp.Spec.ComposedComponents() {
 		if err := p.syncChart(ctx, repoDir, c.Template.Name, c.Template.Version); err != nil {
 			return fmt.Errorf("sync chart for component %s (%s@%s): %w", c.Name, c.Template.Name, c.Template.Version, err)
@@ -1541,7 +1541,7 @@ func (p *Publisher) publishAppFiles(ctx context.Context, repoDir string, app *do
 
 		// Env-scoped template pins: app.yaml's ChartPath below must point at THIS
 		// env's effective template version.
-		app := domain.AppForEnvTemplateVersions(ValidationApp(app, env.BaseEnv), env.EnvName)
+		app := domain.AppForEnvTemplateVersions(domain.AppForReleaseValidation(ValidationApp(app, env.BaseEnv), env.EnvName), env.EnvName)
 		dormant, err := p.validationDormant(repoDir, app, env)
 		if err != nil {
 			return err

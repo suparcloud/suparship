@@ -297,3 +297,23 @@ allows normal downstream promotion and triggers validation cleanup. Confirm the
 actual production image and successful Kargo Promotion before declaring delivery
 complete. If provisioning fails again, inspect its error and effective validation
 values rather than repeatedly clearing the retention window.
+
+### Choose which components run in validation
+
+In **Manage components**, use **Include in release validation** and then **Save
+components**. All components are included by default, including databases, workers,
+and jobs. This setting is independent of **Include in previews**.
+
+Set `releaseValidationEnabled: false` on a component to omit it from the selected
+release-validation environment. Staging, production, and preview inclusion keep
+their existing settings. Kargo only updates and checks the included validation
+components; production still deploys its complete component set.
+
+At least one component must be included when release validation is enabled.
+Included components must work without excluded dependencies, or have validation
+values pointing to an external dependency. Excluding a retained database does not
+require marking it disposable. Included stateful components in ephemeral mode
+still require the validation-only disposable policy and temporary storage.
+
+Wait for an ephemeral validator to be **Idle** before changing component selection.
+The UI labels excluded components and omits them from validation runtime totals.

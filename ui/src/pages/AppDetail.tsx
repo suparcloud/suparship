@@ -2740,8 +2740,8 @@ function AppValuesEditor({
     setValidationEnvironment(data.cd?.releaseValidationEnvironment ?? "");
     setValidationMode(!data.cd?.releaseValidationEnvironment || data.cd?.releaseValidationMode === "ephemeral" ? "ephemeral" : "persistent");
     setSeparateValidation(Boolean(data.cd?.releaseValidationEnvironment));
-    setValidationValues(Object.fromEntries(data.components.filter(c=>c.stateful).map(c=>[c.name,stringifyOverlay(c.envValues?.[data.cd?.releaseValidationEnvironment || "release-validation"])])));
-    setValidationPolicies(Object.fromEntries(data.components.filter(c=>c.stateful).map(c=>[c.name,c.releaseValidationDataPolicy==="disposable"?"disposable":"retain"])));
+    setValidationValues(Object.fromEntries(data.components.filter(c=>c.stateful && c.enabledInReleaseValidation !== false).map(c=>[c.name,stringifyOverlay(c.envValues?.[data.cd?.releaseValidationEnvironment || "release-validation"])])));
+    setValidationPolicies(Object.fromEntries(data.components.filter(c=>c.stateful && c.enabledInReleaseValidation !== false).map(c=>[c.name,c.releaseValidationDataPolicy==="disposable"?"disposable":"retain"])));
     setVerification(Object.fromEntries(Object.entries(data.cd?.verification ?? {}).map(([env, names]) => [env, names.join(", ")])));
     setPreviewsEnabled(data.previewsEnabled ?? true);
     setDeliveryMode(data.deliveryMode === "direct" ? "direct" : "pipeline");
@@ -2901,7 +2901,7 @@ function AppValuesEditor({
 
   const cdDirty =
  Object.entries(validationValues).some(([name,text])=>{const parsed=parseYamlOverlay(text);const component=data.components.find(c=>c.name===name);return parsed.error!==null || !deepEqual(parsed.value??{},component?.envValues?.[validationEnvironment||"release-validation"]??{});}) ||
- JSON.stringify(validationPolicies)!==JSON.stringify(Object.fromEntries(data.components.filter(c=>c.stateful).map(c=>[c.name,c.releaseValidationDataPolicy==="disposable"?"disposable":"retain"]))) ||
+ JSON.stringify(validationPolicies)!==JSON.stringify(Object.fromEntries(data.components.filter(c=>c.stateful && c.enabledInReleaseValidation !== false).map(c=>[c.name,c.releaseValidationDataPolicy==="disposable"?"disposable":"retain"]))) ||
     cdManaged !== (data.cd?.managed ?? false) ||
     autoPromote !== (data.cd?.autoPromote ?? false) ||
     (separateValidation ? validationEnvironment : "") !== (data.cd?.releaseValidationEnvironment ?? "") ||
@@ -3610,11 +3610,11 @@ function AppValuesEditor({
                     <p className="text-xs text-gray-500">Disabling restores the ordered pipeline. For ephemeral validation, wait until cleanup finishes before changing lifecycle or environment. Pins and rollbacks require persistent mode; suspension pauses new runs.</p>
                   </div>
                 )}
-                {separateValidation && validationMode === "ephemeral" && data.components.some(c=>c.stateful) && (
+                {separateValidation && validationMode === "ephemeral" && data.components.some(c=>c.stateful && c.enabledInReleaseValidation !== false) && (
  <fieldset className="mt-3 space-y-2 rounded border border-gray-200 p-3">
  <legend className="px-1 text-sm font-medium text-gray-700">Stateful validation data</legend>
  <p className="text-xs text-gray-500">Each stateful component must be explicitly disposable. Disable persistence in its release-validation values. Suparship checks the rendered chart and rejects PVCs, volume claim templates and external storage. Staging and production keep their storage protection.</p>
- {data.components.filter(c=>c.stateful).map(c=><div key={c.name} className="space-y-2"><label className="flex items-center gap-2 text-xs text-gray-700"><input type="checkbox" checked={validationPolicies[c.name]==="disposable"} onChange={e=>setValidationPolicies(current=>({...current,[c.name]:e.target.checked?"disposable":"retain"}))} />Dispose of {c.name} data only in ephemeral release validation</label>{validationPolicies[c.name]==="disposable" && <label className="block text-xs text-gray-600">{c.name} validation values<textarea className="mt-1 block w-full rounded border border-gray-300 p-2 font-mono text-xs" rows={4} value={validationValues[c.name]??""} placeholder={"persistence:\n  enabled: false"} onChange={e=>setValidationValues(current=>({...current,[c.name]:e.target.value}))} /><span className="mt-1 block text-gray-500">Only validation is affected. Use the persistence settings supported by this component’s chart; other environments keep their existing values.</span></label>}</div>)}
+ {data.components.filter(c=>c.stateful && c.enabledInReleaseValidation !== false).map(c=><div key={c.name} className="space-y-2"><label className="flex items-center gap-2 text-xs text-gray-700"><input type="checkbox" checked={validationPolicies[c.name]==="disposable"} onChange={e=>setValidationPolicies(current=>({...current,[c.name]:e.target.checked?"disposable":"retain"}))} />Dispose of {c.name} data only in ephemeral release validation</label>{validationPolicies[c.name]==="disposable" && <label className="block text-xs text-gray-600">{c.name} validation values<textarea className="mt-1 block w-full rounded border border-gray-300 p-2 font-mono text-xs" rows={4} value={validationValues[c.name]??""} placeholder={"persistence:\n  enabled: false"} onChange={e=>setValidationValues(current=>({...current,[c.name]:e.target.value}))} /><span className="mt-1 block text-gray-500">Only validation is affected. Use the persistence settings supported by this component’s chart; other environments keep their existing values.</span></label>}</div>)}
  </fieldset>
  )}
                 <p className="mt-3 text-sm font-medium text-gray-700">Acceptance checks</p>
@@ -5677,7 +5677,8 @@ function ComponentsTable({
             const cs = componentStatus.get(comp.name);
             // Prefer the component's own live status; fall back to the app-level
             // phase + the aggregate replica heuristic when it isn't reported.
-            const compPhase = cs?.phase ?? phase;
+            const excludedFromValidation = currentEnv?.envName === data.cd?.releaseValidationEnvironment && comp.enabledInReleaseValidation === false;
+ const compPhase = cs?.phase ?? phase;
             const replicas =
               comp.type === "cron" || comp.type === "job"
                 ? "—"
@@ -5765,13 +5766,13 @@ function ComponentsTable({
 
                   {/* Right: replicas + status + preview eligibility */}
                   <div className="ml-4 flex flex-shrink-0 items-center gap-3">
-                    {replicas !== "—" && (
+                    {!excludedFromValidation && replicas !== "—" && (
                       <span className="text-xs text-gray-400">
                         {replicas}{" "}
                         <span className="text-gray-300">replicas</span>
                       </span>
                     )}
-                    <StatusBadge status={compPhase} />
+                    {excludedFromValidation ? <span className="text-xs text-gray-500">Excluded from validation</span> : <StatusBadge status={compPhase} />}
                     {!comp.enabledInPreview && (
                       <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
                         no preview

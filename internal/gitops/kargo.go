@@ -301,6 +301,20 @@ func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehous
 // output.
 func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages []string, opts KargoBuildOptions) *KargoStage {
 	opts = applyKargoDefaults(opts, app)
+	if env.EnvName == app.Spec.CD.ReleaseValidationEnvironment && app.Spec.IsComposed() {
+		app = domain.AppForReleaseValidation(app, env.EnvName)
+		included := map[string]bool{}
+		for _, c := range app.Spec.Components {
+			included[c.Name] = true
+		}
+		images := make([]KargoImage, 0, len(opts.Images))
+		for _, img := range opts.Images {
+			if included[img.Name] {
+				images = append(images, img)
+			}
+		}
+		opts.Images = images
+	}
 
 	stageName := KargoStageName(app.Name, env.EnvName)
 

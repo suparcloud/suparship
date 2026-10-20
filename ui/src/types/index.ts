@@ -617,6 +617,8 @@ export interface ComponentSummary {
   name: string;
   type: "web" | "worker" | "cron" | "job";
   enabledInPreview: boolean;
+  enabledInReleaseValidation?: boolean;
+  releaseValidationEnabled?: boolean;
   exposeMode?: string;
   /** The component's own template. */
   template?: string;
@@ -1020,6 +1022,7 @@ export interface ComponentCreate {
   /** Override preview inclusion. Omit for the type default (web/worker on;
    *  stateful + job/cron off). */
   previewEnabled?: boolean;
+  releaseValidationEnabled?: boolean;
 }
 
 // ComponentImage marks one of a composed component's discovered images as managed

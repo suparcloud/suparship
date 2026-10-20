@@ -238,6 +238,8 @@ type ComponentSpec struct {
 	// per PR). Set explicitly to override. Only meaningful when the app supports
 	// previews (AppSpec.PreviewsEnabled) and is composed.
 	PreviewEnabled *bool `json:"previewEnabled,omitempty" yaml:"previewEnabled,omitempty"`
+	// ReleaseValidationEnabled defaults to true, independently of preview policy.
+	ReleaseValidationEnabled *bool `json:"releaseValidationEnabled,omitempty" yaml:"releaseValidationEnabled,omitempty"`
 }
 
 // EnabledInPreview reports whether this component is rendered into a preview env.
@@ -632,6 +634,10 @@ func dedupe(in []string) []string {
 //
 // Secret values MUST NOT appear here; use SecretRefs or EnvConfig.SecretRefs instead.
 type AppSpec struct {
+	// renderComposed preserves the source app rendering mode in filtered copies.
+	// It is never persisted or exposed by the API.
+	renderComposed bool
+
 	// DisplayName is a human-friendly label shown in the UI.
 	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty"`
 	// Description provides optional context about the app's purpose.
@@ -718,7 +724,7 @@ func (s AppSpec) IsDirect() bool { return s.DeliveryMode == DeliveryDirect }
 // source per component. Two components using the same template (api + frontend
 // both web-service) are still two sources.
 func (s AppSpec) IsComposed() bool {
-	return len(s.Components) > 1
+	return s.renderComposed || len(s.Components) > 1
 }
 
 // BackfillComponentTemplates stamps any component whose Template is nil (a legacy
@@ -1137,4 +1143,26 @@ type AppEnvironment struct {
 // DisposableInValidation applies only to the selected ephemeral validator.
 func (c ComponentSpec) DisposableInValidation(cd CDConfig, env string) bool {
 	return c.Stateful && c.ReleaseValidationDataPolicy == "disposable" && cd.EphemeralValidation() && env == cd.ReleaseValidationEnvironment
+}
+
+// EnabledInReleaseValidation includes every component unless explicitly opted out.
+func (c ComponentSpec) EnabledInReleaseValidation() bool {
+	return c.ReleaseValidationEnabled == nil || *c.ReleaseValidationEnabled
+}
+
+// AppForReleaseValidation returns an environment-scoped copy; stable environments
+// and stored component definitions remain untouched.
+func AppForReleaseValidation(app *App, env string) *App {
+	if env == "" || env != app.Spec.CD.ReleaseValidationEnvironment || !app.Spec.IsComposed() {
+		return app
+	}
+	out := *app
+	out.Spec.renderComposed = true
+	out.Spec.Components = make([]ComponentSpec, 0, len(app.Spec.Components))
+	for _, c := range app.Spec.Components {
+		if c.EnabledInReleaseValidation() {
+			out.Spec.Components = append(out.Spec.Components, c)
+		}
+	}
+	return &out
 }
