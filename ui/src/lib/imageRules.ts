@@ -248,3 +248,17 @@ export function imageRulesToAppImages(
   }
   return out;
 }
+
+// Grouped rows can be checked because a sibling has a binding while another
+// component is missing one. Surface this so saving can repair the partial group.
+export function missingComponentImageBindings(
+  discovered: TemplateImage[],
+  rules: ImageRules,
+  components: { name: string; images?: ComponentImage[] }[],
+): string[] {
+  const saved = savedByTagKeyFromComponents(components);
+  return [...new Set(discovered.filter((img) =>
+    img.component && rules[img.repository?.trim() ?? ""]?.watched &&
+    !saved[bindingKey(img.component, img.tagKey)],
+  ).map((img) => img.component!))];
+}

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Detect incomplete component bindings behind a checked shared image rule and
+  enable Save to apply that rule to every listed component.
+
 - Preserve template-resolved component image tags during Sync to Git and apply
   stable-environment pins to those bindings, preventing empty overlay tags from
   replacing promoted or pinned releases.

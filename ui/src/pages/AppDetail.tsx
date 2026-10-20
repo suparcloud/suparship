@@ -30,6 +30,7 @@ import { ComponentEnvPanel } from "../components/ComponentEnvPanel";
 import { effectiveComponentEnvVars } from "../lib/componentEnv";
 import {
   groupByRepo,
+  missingComponentImageBindings,
   imageRulesToAppImages,
   imageRulesToComponentImages,
   savedByTagKeyFromApp,
@@ -3107,7 +3108,11 @@ function AppValuesEditor({
 
   // Dirty = the edited rules differ from the saved baseline (re-seeded from the
   // persisted bindings), so Save enables only on an actual change.
+  const missingImageBindings = composedApp
+    ? missingComponentImageBindings(discoveredImages, imageRules, data.components ?? [])
+    : [];
   const imagesDirty = (() => {
+    if (missingImageBindings.length > 0) return true;
     const savedTK = composedApp
       ? savedByTagKeyFromComponents(data.components ?? [])
       : savedByTagKeyFromApp(data.images);
@@ -3655,6 +3660,12 @@ function AppValuesEditor({
                   Detected from this app's effective values. One rule per unique
                   image — pick which Kargo watches and how it selects tags.
                 </p>
+                {missingImageBindings.length > 0 && (
+                  <p className="mb-3 text-sm text-amber-700" role="status">
+                    The selected image rule is not saved for: {missingImageBindings.join(", ")}.
+                    Save to apply it to every listed component.
+                  </p>
+                )}
                 <ImagePullRules
                   discovered={discoveredImages}
                   rules={imageRules}
