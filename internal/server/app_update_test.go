@@ -339,3 +339,30 @@ func TestUpdateApp_RollsBackOnPublishFailure(t *testing.T) {
 		t.Errorf("displayName should have rolled back to Original, got %q", got.Spec.DisplayName)
 	}
 }
+
+func TestUpdateApp_PreviewValuesDoNotRequireValidationController(t *testing.T) {
+	pub := &updatePublisher{}
+	mux, auth, store := newTestAppUpdateMuxWithTemplates(testProject, pub, []*tpl.Template{templateAt("web-service", "1.0.0")})
+	app := pinnedComponentApp(testProject)
+	app.Spec.CD = domain.CDConfig{Managed: true, ReleaseValidationManaged: true, ReleaseValidationEnvironment: "release-validation", ReleaseValidationMode: "ephemeral"}
+	store.addApp(app)
+	store.addEnv(&domain.AppEnvironment{AppName: app.Name, ProjectName: testProject, EnvName: "production", EnvType: domain.AppEnvProd, Order: 2, Namespace: "prod"})
+	store.addEnv(&domain.AppEnvironment{AppName: app.Name, ProjectName: testProject, EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Namespace: "staging"})
+	store.addEnv(&domain.AppEnvironment{AppName: app.Name, ProjectName: testProject, EnvName: domain.ManagedValidationEnv, BaseEnv: "staging", EnvType: domain.AppEnvStaging, Order: 3, Namespace: domain.ValidationIdentity(testProject, app.Name)})
+	rec := patchAppJSON(mux, sessionCookieFor(auth, "alice", "org_admin"), testProject, "my-app", updateAppRequest{
+		EnvComponentValues: map[string]map[string]map[string]any{"preview": {"web": {"replicaCount": 2}}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview save: %d %s", rec.Code, rec.Body.String())
+	}
+	if pub.publishApps != 0 {
+		t.Fatalf("preview save published stable environments %d times", pub.publishApps)
+	}
+	saved, err := store.GetApp(context.Background(), testProject, "my-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Spec.EnvironmentDefaults["preview"].ComponentValues["web"]["replicaCount"] == nil {
+		t.Fatal("preview values were not saved")
+	}
+}

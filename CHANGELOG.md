@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Scope preview-band values and variable saves to preview publication, avoiding
+  unrelated ephemeral-validation locks and stable environment publication.
+
 - Discover Manage components CD images across editable environments so saving
   release-validation settings does not drop base-only image bindings. Block saves
   during failed or pending discovery instead of treating failures as empty results.

@@ -999,9 +999,11 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := ah.validateReleaseValidation(r.Context(), app, validationEnvs); err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-		return
+	if !previewValuesOnly(req) {
+		if err := ah.validateReleaseValidation(r.Context(), app, validationEnvs); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
 	}
 	if (prevCD.ReleaseValidationManaged != app.Spec.CD.ReleaseValidationManaged || prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment || prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode) && ah.kargoPipelineReader != nil {
 		stages, err := ah.kargoPipelineReader.ListAppStageStatuses(r.Context(), projectName, appName)
@@ -1057,8 +1059,30 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			if len(stableEnvs) == 0 {
 				stableEnvs = ah.stableEnvsFromOrg(ctx, app)
 			}
-			ah.ensureAppNamespaces(ctx, app, stableEnvs)
-			if err := ah.gitOpsPublisher.PublishApp(ctx, app, stableEnvs); err != nil {
+			var publishErr error
+			if previewValuesOnly(req) {
+				var targets []PreviewPublishTarget
+				for _, env := range allEnvs {
+					if env.EnvType != domain.AppEnvPreview {
+						continue
+					}
+					if env.Release == nil || env.Release.Tag == "" || env.BaseEnv == "" {
+						publishErr = fmt.Errorf("preview %s is missing its base environment or image tag", env.EnvName)
+						break
+					}
+					targets = append(targets, PreviewPublishTarget{App: app, Preview: &domain.EnvironmentInstance{
+						AppName: app.Name, ProjectName: app.ProjectName, EnvName: env.EnvName,
+						EnvType: domain.AppEnvPreview, Namespace: env.Namespace,
+					}, BaseEnv: env.BaseEnv, ImageTag: env.Release.Tag})
+				}
+				if publishErr == nil {
+					publishErr = ah.publishPreviewsBatch(ctx, targets)
+				}
+			} else {
+				ah.ensureAppNamespaces(ctx, app, stableEnvs)
+				publishErr = ah.gitOpsPublisher.PublishApp(ctx, app, stableEnvs)
+			}
+			if err := publishErr; err != nil {
 				app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
 				app.Spec.EnvironmentDefaults = prevEnvDefaults
 				app.Spec.RawValues = prevRawValues
@@ -1082,7 +1106,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		savedEnvs, _ := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
 		return http.StatusOK, updateAppResponse{App: appToDetailDTO(saved, savedEnvs)}, nil
 	}
-	if prevCD.EphemeralValidation() {
+	if prevCD.EphemeralValidation() && !previewValuesOnly(req) {
 		original := op
 		op = func(ctx context.Context) (int, any, error) {
 			controller, ok := ah.kargoPromoter.(validationRunController)
