@@ -1298,11 +1298,11 @@ export function AppDetail() {
     data.environments.find((e) => e.envName === selectedEnvName) ?? null;
   // Prefer the freshly-fetched env detail when available; fall back to summary.
   const currentEnv: AppEnvironmentSummary | null =
-    selectedEnvDetail ?? currentEnvSummary;
+    selectedEnvDetail?.envName === selectedEnvName
+      ? selectedEnvDetail
+      : currentEnvSummary;
   const overallStatus = overallPhase(data.environments);
-  const primaryUrl =
-    currentEnv?.urls[0] ??
-    data.environments.find((e) => e.urls.length > 0)?.urls[0];
+  const primaryUrl = currentEnv?.urls[0];
 
   return (
     <div className="space-y-6">
@@ -4206,7 +4206,7 @@ function OverviewTab({
     ? componentTags.map((c) => `${c.component}: ${c.tag}`).join("  ·  ")
     : undefined;
   const lastDeployed = formatTime(currentEnv?.status.lastDeployed);
-  const urls = currentEnv?.urls ?? [];
+  const urls = [...new Set(currentEnv?.urls ?? [])];
 
   return (
     <div className="space-y-6">

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -4726,7 +4727,11 @@ func mergeRuntime(dst, src *runtime.RuntimeInfo) {
 	if dst.Image == "" {
 		dst.Image = src.Image
 	}
-	dst.IngressURLs = append(dst.IngressURLs, src.IngressURLs...)
+	for _, url := range src.IngressURLs {
+		if !slices.Contains(dst.IngressURLs, url) {
+			dst.IngressURLs = append(dst.IngressURLs, url)
+		}
+	}
 }
 
 // applyComponentRuntimes aggregates per-component infos into the env-level status

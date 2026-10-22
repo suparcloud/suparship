@@ -87,3 +87,29 @@ func TestSplitReleaseDiagnostic(t *testing.T) {
 		t.Errorf("single component must not warn: %+v", d)
 	}
 }
+
+func TestApplyComponentRuntimes_EndpointUnionIsEnvironmentLocal(t *testing.T) {
+	ah := &appHandler{}
+	instances := []domain.WorkloadInstance{{Component: "backend"}, {Component: "frontend"}, {Component: "routes"}}
+	for _, host := range []string{"https://staging.example.com", "https://production.example.com"} {
+		env := &domain.AppEnvironment{}
+		byComp := map[string]*runtime.RuntimeInfo{
+			"backend":  {Status: runtime.StatusHealthy, IngressURLs: []string{host, host}},
+			"frontend": {Status: runtime.StatusHealthy, IngressURLs: []string{host}},
+			"routes":   {Status: runtime.StatusHealthy, IngressURLs: []string{host + "/api", host + "/static", host}},
+		}
+		ah.applyComponentRuntimes(env, instances, byComp)
+		want := []string{host, host + "/api", host + "/static"}
+		if len(env.URLs) != len(want) {
+			t.Fatalf("URLs = %v, want %v", env.URLs, want)
+		}
+		for i, u := range want {
+			if env.URLs[i] != u {
+				t.Errorf("URL %d = %q, want %q", i, env.URLs[i], u)
+			}
+		}
+		if len(byComp["backend"].IngressURLs) != 2 {
+			t.Fatal("aggregation mutated source URLs")
+		}
+	}
+}
