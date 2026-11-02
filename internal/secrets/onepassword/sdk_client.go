@@ -29,7 +29,8 @@ type SDKClient struct {
 
 // NewSDKClient creates an SAClient backed by the 1Password Go SDK.
 // The token must be a valid Service Account token.
-func NewSDKClient(ctx context.Context, token string) (*SDKClient, error) {
+func NewSDKClient(ctx context.Context, token string) (resultValue *SDKClient, err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	if token == "" {
 		return nil, ErrTokenInvalid
 	}
@@ -59,7 +60,8 @@ func (c *SDKClient) Probe(ctx context.Context) (int, error) {
 	return len(vaults), nil
 }
 
-func (c *SDKClient) CreateVault(ctx context.Context, title, description string) (VaultInfo, error) {
+func (c *SDKClient) CreateVault(ctx context.Context, title, description string) (resultValue VaultInfo, err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
@@ -79,7 +81,8 @@ func (c *SDKClient) CreateVault(ctx context.Context, title, description string) 
 	}, nil
 }
 
-func (c *SDKClient) ListVaults(ctx context.Context) ([]VaultInfo, error) {
+func (c *SDKClient) ListVaults(ctx context.Context) (resultValue []VaultInfo, err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
@@ -98,7 +101,8 @@ func (c *SDKClient) ListVaults(ctx context.Context) ([]VaultInfo, error) {
 	return vaults, nil
 }
 
-func (c *SDKClient) GetVault(ctx context.Context, vaultID string) (VaultInfo, error) {
+func (c *SDKClient) GetVault(ctx context.Context, vaultID string) (resultValue VaultInfo, err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
@@ -117,7 +121,8 @@ func (c *SDKClient) GetVault(ctx context.Context, vaultID string) (VaultInfo, er
 	}, nil
 }
 
-func (c *SDKClient) DeleteVault(ctx context.Context, vaultID string) error {
+func (c *SDKClient) DeleteVault(ctx context.Context, vaultID string) (err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
@@ -130,11 +135,12 @@ func (c *SDKClient) DeleteVault(ctx context.Context, vaultID string) error {
 	return nil
 }
 
-func (c *SDKClient) GrantGroupAccess(ctx context.Context, vaultID, groupID string, perms Permission) error {
+func (c *SDKClient) GrantGroupAccess(ctx context.Context, vaultID, groupID string, perms Permission) (err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
-	err := c.client.Vaults().GrantGroupPermissions(ctx, vaultID, []onepasswordsdk.GroupAccess{
+	err = c.client.Vaults().GrantGroupPermissions(ctx, vaultID, []onepasswordsdk.GroupAccess{
 		{
 			GroupID:     groupID,
 			Permissions: uint32(perms),
@@ -146,11 +152,12 @@ func (c *SDKClient) GrantGroupAccess(ctx context.Context, vaultID, groupID strin
 	return nil
 }
 
-func (c *SDKClient) RevokeGroupAccess(ctx context.Context, vaultID, groupID string) error {
+func (c *SDKClient) RevokeGroupAccess(ctx context.Context, vaultID, groupID string) (err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
-	err := c.client.Vaults().RevokeGroupPermissions(ctx, vaultID, groupID)
+	err = c.client.Vaults().RevokeGroupPermissions(ctx, vaultID, groupID)
 	if err != nil {
 		return fmt.Errorf("onepassword: revoke group access on vault %q: %w", vaultID, err)
 	}
@@ -171,7 +178,8 @@ func (c *SDKClient) RevokeConnectToken(_ context.Context, _ string) error {
 	return fmt.Errorf("onepassword: Connect token revocation via SDK is not yet supported; requires CLI fallback (op connect token revoke)")
 }
 
-func (c *SDKClient) UpsertItem(ctx context.Context, vaultID, title string, fields []ItemField) (string, error) {
+func (c *SDKClient) UpsertItem(ctx context.Context, vaultID, title string, fields []ItemField) (resultValue string, err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
@@ -225,7 +233,8 @@ func (c *SDKClient) UpsertItem(ctx context.Context, vaultID, title string, field
 	return created.ID, nil
 }
 
-func (c *SDKClient) GetItem(ctx context.Context, vaultID, itemID string) (Item, error) {
+func (c *SDKClient) GetItem(ctx context.Context, vaultID, itemID string) (resultValue Item, err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
@@ -258,7 +267,8 @@ func (c *SDKClient) GetItem(ctx context.Context, vaultID, itemID string) (Item, 
 	}, nil
 }
 
-func (c *SDKClient) ListItems(ctx context.Context, vaultID string) ([]ItemOverview, error) {
+func (c *SDKClient) ListItems(ctx context.Context, vaultID string) (resultValue []ItemOverview, err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 
@@ -278,7 +288,8 @@ func (c *SDKClient) ListItems(ctx context.Context, vaultID string) ([]ItemOvervi
 	return out, nil
 }
 
-func (c *SDKClient) DeleteItem(ctx context.Context, vaultID, itemID string) error {
+func (c *SDKClient) DeleteItem(ctx context.Context, vaultID, itemID string) (err error) {
+	defer func() { sdkRuntimeHealth.observe(err) }()
 	sdkInvokeMu.Lock()
 	defer sdkInvokeMu.Unlock()
 

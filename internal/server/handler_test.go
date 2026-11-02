@@ -170,3 +170,14 @@ func TestMethodNotAllowed(t *testing.T) {
 		})
 	}
 }
+
+func TestHealthzRuntimeFailure(t *testing.T) {
+	rec := httptest.NewRecorder()
+	serveHealthz(rec, fmt.Errorf("internal sensitive SDK details"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", rec.Code)
+	}
+	if rec.Body.String() != "secret provider runtime requires restart\n" {
+		t.Fatalf("unexpected health body: %q", rec.Body.String())
+	}
+}

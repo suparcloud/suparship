@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/license"
+	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/version"
 )
 
@@ -43,7 +44,15 @@ func registerRoutes(mux *http.ServeMux, probers []ReadinessProber, lic license.V
 }
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	serveHealthz(w, onepassword.RuntimeHealthError())
+}
+
+func serveHealthz(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if err != nil {
+		http.Error(w, "secret provider runtime requires restart", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
