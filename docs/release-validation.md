@@ -337,3 +337,36 @@ one-minute deployment guarantee; image pulls, startup, tests and controller load
 still contribute. Existing Warehouses receive the new interval when their app's
 GitOps configuration is republished and applied. The running Suparship service
 must be upgraded to use the new refresh behavior.
+
+### Automatic recovery from a 1Password runtime trap
+
+Suparship detects the `wasm error: out of bounds memory access` failure from
+1Password SDK operations, including client initialization, reads and writes.
+This is a failure of the SDK's process-wide runtime. Creating a new SDK client
+reuses that runtime and cannot repair it through the SDK's public API.
+
+After a trap, `/healthz` returns HTTP 503 until the process restarts. The Helm
+chart's existing Kubernetes liveness probe restarts the container after three
+failed probes at 15-second intervals, plus termination and startup time. The
+replacement controller resumes the persisted validation run and selected Freight.
+A hard termination can leave a lease that must expire before work resumes (up to
+15 minutes). The existing 30-minute preparation deadline still applies.
+
+Recovery does not replay the failed SDK call. In particular, a write whose result
+is uncertain is returned to its caller as an error. Validation reconciliation
+subsequently rechecks secret items through its normal ensure/read path. Ordinary
+network, authentication, permission and rate-limit errors do not fail liveness.
+
+The first runtime trap emits an error log with `recovery=process_restart`; no SDK
+payload is included in that event or the health response. Lifecycle retry errors
+are also visible at warning level, except normal lease contention and shutdown
+cancellation. Alert on this recovery event and repeated container restarts. A
+persistent reproducible trap can cause repeated restarts; Kubernetes restart
+backoff limits their frequency, but an operator must investigate recurrence.
+
+This recovery requires a supervisor that restarts an unhealthy process. Custom
+Kubernetes deployments must retain the `/healthz` liveness probe. Standalone
+processes expose the same failure signal but require an external supervisor or
+manual restart. A single-replica server has a brief API/UI interruption during
+restart. This mechanism does not add a user-facing retry banner or external alert
+rules, and it does not isolate the SDK in a separate worker process.

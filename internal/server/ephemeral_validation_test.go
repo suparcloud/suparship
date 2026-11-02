@@ -182,3 +182,34 @@ func TestValidationRefreshOnlyWhileWaitingForActivationOrVerification(t *testing
 		}
 	}
 }
+
+func TestValidationProvisioningResumesAfterProviderRecovery(t *testing.T) {
+	now := time.Now()
+	run := domain.ValidationRun{Phase: "provisioning", Freight: "selected-build", Cursor: now, StartedAt: now}
+	before := run
+	actions := validationRunActions{workloads: func(bool) error { return errors.New("secret provider runtime unavailable") }}
+	if err := advanceValidationRun(context.Background(), &run, domain.ValidationObservation{}, now, actions); err == nil {
+		t.Fatal("expected retryable provider error")
+	}
+	if run != before {
+		t.Fatalf("provider error changed durable run: %+v", run)
+	}
+	// Simulate loading the persisted run in the replacement controller.
+	restored := run
+	actions.workloads = func(bool) error { return nil }
+	if err := advanceValidationRun(context.Background(), &restored, domain.ValidationObservation{}, now.Add(time.Minute), actions); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Phase != "waiting" || restored.Freight != before.Freight || restored.Cursor != before.Cursor {
+		t.Fatalf("did not resume selected build: %+v", restored)
+	}
+	promotions := 0
+	actions.ready = func(bool) (bool, error) { return true, nil }
+	actions.promote = func() error { promotions++; return nil }
+	if err := advanceValidationRun(context.Background(), &restored, domain.ValidationObservation{}, now.Add(2*time.Minute), actions); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Phase != "running" || promotions != 1 {
+		t.Fatalf("unexpected promotion: %+v, count=%d", restored, promotions)
+	}
+}

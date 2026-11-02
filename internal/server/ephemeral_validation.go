@@ -104,8 +104,8 @@ func (ah *appHandler) reconcileEphemeralValidation(ctx context.Context, app *dom
 			err = ah.gitOpsPublisher.PublishApp(ctx, app, envs)
 		}
 	}
-	if err != nil {
-		slog.Debug("ephemeral validation: retrying lifecycle", "project", app.ProjectName, "app", app.Name, "err", err)
+	if err != nil && !errors.Is(err, kube.ErrValidationLeaseBusy) && !errors.Is(err, context.Canceled) {
+		slog.Warn("ephemeral validation: retrying lifecycle", "project", app.ProjectName, "app", app.Name, "err", err)
 	}
 }
 
